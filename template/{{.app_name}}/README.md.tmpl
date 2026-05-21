@@ -1,0 +1,64 @@
+# {{.app_name}}
+
+Generated from [hss-lakebase-app-template](https://github.com/sahilmerali21Oct2024/hss-lakebase-app-template).
+
+## What's in the box
+
+```
+.
+├── app.py                          FastAPI entrypoint + audit middleware
+├── app.yaml                        runtime config (host, port, env, resource bindings)
+├── databricks.yml                  bundle: dev + prod targets, Lakebase binding
+├── permissions.yaml                declarative grants — applied automatically on deploy
+├── alembic.ini                     migration tooling
+├── migrations/                     versioned schema changes (downgrade() is mandatory)
+├── server/
+│   ├── auth/                       OBO + SP helpers
+│   ├── db/                         Lakebase pool with OAuth refresh
+│   ├── middleware/                 audit logger (auto JSON per request)
+│   └── routes/                     health/env routes; add yours here
+├── scripts/
+│   ├── apply_grants.py             post-deploy SP grant runner
+│   ├── lakebase_branch.py          PR branch lifecycle
+│   └── rollback_migration.py       alembic + branch-swap rollback
+├── logs-sink/                      workspace-wide audit pipeline (deploy once)
+├── docs/
+│   ├── ARCHITECTURE.md             read this first
+│   ├── RUNBOOK.md                  common ops
+│   └── DATA_CLASSIFICATION.md      what goes in UC vs Lakebase
+├── .github/workflows/
+│   ├── validate.yml                PR: blocks hardcoded values, validates bundle
+│   ├── deploy.yml                  main: migrate -> deploy -> grant -> restart -> smoke
+│   └── branch-per-pr.yml           per-PR Lakebase branch + migration test
+└── .claude/CLAUDE.md               binding rules for AI-assisted edits
+```
+
+## Quick start
+
+1. Set up GitHub Environments and the variables/secrets listed in
+   [`docs/RUNBOOK.md`](docs/RUNBOOK.md#first-time-setup-per-repo-once).
+2. Deploy once locally for the initial app provisioning:
+   ```bash
+   databricks bundle validate -t dev
+   databricks bundle deploy -t dev
+   python scripts/apply_grants.py --app-name {{.app_name}}
+   databricks apps restart {{.app_name}}
+   ```
+3. From there on, **all deploys go through GitHub Actions.** No exceptions.
+
+## Deploy the workspace-wide log sink (once per workspace, not per app)
+
+```bash
+cd logs-sink
+databricks bundle deploy -t prod
+```
+
+All apps from this template will start showing up in
+`{{.audit_catalog}}.audit.app_events`.
+
+## Where to read next
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — topology, branching, governance.
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — daily ops.
+- [`docs/DATA_CLASSIFICATION.md`](docs/DATA_CLASSIFICATION.md) — what goes where.
+- [`.claude/CLAUDE.md`](.claude/CLAUDE.md) — rules for AI-assisted edits.

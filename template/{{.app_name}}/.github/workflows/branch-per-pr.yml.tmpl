@@ -1,0 +1,103 @@
+{{if ne .enable_branch_per_pr "yes"}}# branch-per-PR workflow disabled at `bundle init` time.
+# Re-enable by re-running `databricks bundle init` with enable_branch_per_pr=yes,
+# or by replacing this file with the version in the template repo.
+{{else}}name: Lakebase Branch per PR
+
+# Solves pain points 2 & 3: every PR gets its own Lakebase branch where we
+# run `alembic upgrade head` BEFORE the change ever touches prod. The branch
+# is torn down on PR close so cost is bounded.
+#
+# Cost model (verify with your AE before turning on org-wide):
+#   - A branch = independent serverless Postgres compute, scaled to zero by
+#     default. You pay for storage diff + compute when actively connected.
+#   - PR branches are auto-stopped after 30 min idle and deleted on PR close.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+
+concurrency:
+  group: lakebase-branch-pr-${{"{{"}} github.event.pull_request.number {{"}}"}}
+  cancel-in-progress: false
+
+jobs:
+  create-or-update-branch:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      APP_NAME: {{.app_name}}
+      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_DATABASE: {{.database_name}}
+      LAKEBASE_BRANCH: pr-${{"{{"}} github.event.pull_request.number {{"}}"}}
+      PARENT_BRANCH: main
+      DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+      DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
+      DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: pip install -r requirements.txt
+
+      - uses: databricks/setup-cli@main
+
+      - name: Create or update PR branch
+        run: python scripts/lakebase_branch.py ensure
+            --instance "$LAKEBASE_INSTANCE"
+            --branch "$LAKEBASE_BRANCH"
+            --parent "$PARENT_BRANCH"
+            --idle-timeout-min 30
+
+      - name: Apply migrations against PR branch
+        run: alembic upgrade head
+
+      - name: Comment PR with branch endpoint
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = process.env.LAKEBASE_BRANCH;
+            const inst = process.env.LAKEBASE_INSTANCE;
+            const body = [
+              "Lakebase PR branch ready",
+              "",
+              "- Instance: `" + inst + "`",
+              "- Branch:   `" + branch + "`",
+              "- Database: `" + process.env.LAKEBASE_DATABASE + "`",
+              "",
+              "Migrations applied: see job log. Branch auto-deletes on PR close."
+            ].join("\n");
+            await github.rest.issues.createComment({
+              issue_number: context.payload.pull_request.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  delete-branch:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_BRANCH: pr-${{"{{"}} github.event.pull_request.number {{"}}"}}
+      DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+      DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
+      DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: databricks/setup-cli@main
+      - name: Delete PR branch
+        run: python scripts/lakebase_branch.py delete
+            --instance "$LAKEBASE_INSTANCE"
+            --branch "$LAKEBASE_BRANCH"
+{{end}}

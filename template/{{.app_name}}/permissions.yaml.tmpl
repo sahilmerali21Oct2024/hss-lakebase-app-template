@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# permissions.yaml — declarative permission spec for this app.
+#
+# The post-deploy `grants` GitHub Actions job reads this file, looks up the
+# app's service principal client_id, and runs the GRANT statements automatically.
+# You no longer need to ask an admin to add Lakebase roles or UC permissions.
+#
+# Add/remove schemas as your app evolves. The grants job is idempotent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+lakebase:
+  database: "{{.database_name}}"
+  schemas:
+    - name: public
+      grants: [USAGE, CREATE]
+      table_grants: [SELECT, INSERT, UPDATE, DELETE]
+      sequence_grants: [USAGE, SELECT, UPDATE]
+
+unity_catalog:
+  # `catalog` is resolved per-target from databricks.yml `var.catalog`.
+  # Do NOT hardcode catalog names here.
+  schemas: []
+  # Example — uncomment and customise:
+  # - name: rev_cycle
+  #   grants: [USE_SCHEMA, SELECT]
+  #   tables: ["*"]
+  # - name: app_state
+  #   grants: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE]
+  #   tables: ["*"]
+
+  volumes: []
+  # - schema: rev_cycle
+  #   name: source_files
+  #   grants: [READ_VOLUME]
+
+  warehouses: []
+  # - id: ${var.warehouse_id}
+  #   grants: [CAN_USE]

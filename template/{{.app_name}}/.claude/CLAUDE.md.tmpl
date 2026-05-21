@@ -1,0 +1,80 @@
+# {{.app_name}} — Development Rules
+
+This file is read by Claude / Cursor before generating code. Treat it as
+binding. The CI validator enforces most of it; reviewers enforce the rest.
+
+## Architecture (read first)
+
+Before changing anything Lakebase-related, read:
+- `docs/ARCHITECTURE.md`
+- `docs/RUNBOOK.md`
+- `docs/DATA_CLASSIFICATION.md`
+
+## Auth
+
+- **OBO** (`x-forwarded-access-token`) for every user-facing read from Unity Catalog.
+- **SP** for Lakebase writes, background tasks, and audit logging.
+- Pick clients via `server/auth/config.py` helpers; never construct
+  `WorkspaceClient` ad hoc.
+- `DATABRICKS_HOST` may arrive without `https://` — `get_workspace_host()`
+  normalises it. Always go through that helper.
+
+## Lakebase
+
+- Connection pool with OAuth token refresh every 45 min lives in
+  `server/db/lakebase.py`. Do not bypass it.
+- `asyncpg` with `ssl="require"`.
+- Schema changes go through **Alembic migrations**. Never run manual
+  `ALTER TABLE` against prod. Every migration MUST implement `downgrade()`
+  — the validator will reject empty `pass` downgrades.
+- Read `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER` from env — they are
+  injected by the `lakebase_db` resource binding in `databricks.yml`.
+- For *cross-app* reads, request access to the `shared_ref` DB; do not
+  duplicate reference data into your own DB.
+
+## Data classification (binding)
+
+- **Sensitive data (PHI/PII/regulated) stays in UC and is read via OBO.**
+- Lakebase is for app state, derived data, reference data, write-back of
+  user actions.
+- If you genuinely need to cache sensitive data in Lakebase, see
+  `docs/DATA_CLASSIFICATION.md` — you need a SQL view filter, server-side
+  enforcement, and a data-steward sign-off in the PR.
+
+## Permissions
+
+- Declare every UC schema/table and every Lakebase schema/table your app
+  needs in `permissions.yaml`. The `apply_grants.py` script runs after each
+  deploy and grants them to the app SP.
+- Do not ask an admin to grant things manually — that means the YAML is
+  wrong. Fix the YAML, redeploy.
+
+## Logging
+
+- `AuditLoggerMiddleware` auto-captures every request as JSON. Do not add
+  manual `print`/`logger.info` per route — it duplicates audit lines.
+- Logs flow to stdout, then to the workspace `logs-sink` pipeline, which
+  lands them in `{{.audit_catalog}}.audit.app_events`.
+- Add app-specific fields by wrapping a request handler with your own log
+  emit, not by modifying the middleware.
+
+## Environment / deployment
+
+- **The only deploy path is GitHub Actions** (`.github/workflows/deploy.yml`).
+  No manual `databricks bundle deploy` from laptops, no UI uploads, no
+  "click restart". Bypassing the pipeline skips migrations, grants, and
+  the smoke test.
+- All environment-specific values live in `databricks.yml` under
+  `variables` / `targets`. The validator blocks PRs that hardcode a
+  catalog name, workspace URL, or token.
+- `app.yaml` must bind `0.0.0.0:8000`. Validator enforces.
+
+## Tests
+
+- Add a smoke test under `tests/` for any new route that touches
+  Lakebase. The PR-branch CI is the right time to catch breakage.
+
+## When in doubt
+
+Open `docs/ARCHITECTURE.md`, then ask Sahil or Juliana in
+`#hss-app-platform`. Do not invent a new pattern silently.

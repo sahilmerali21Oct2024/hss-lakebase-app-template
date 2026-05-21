@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# app.yaml — runtime config consumed by Databricks Apps.
+#
+# DO NOT put environment-specific values here. Anything that differs between
+# dev and prod belongs in databricks.yml under `variables` / `targets`.
+# The pre-deploy validator (.github/workflows/validate.yml) will block the PR
+# if it sees a hardcoded catalog name or credential token in this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+{{if eq .use_obo "yes"}}user_api_scopes:
+  - sql
+  - files.files
+  - dashboards.genie{{end}}
+
+env:
+  - name: APP_NAME
+    value: "{{.app_name}}"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: AUDIT_LOG_SINK
+    value: "stdout"   # the logs-sink pipeline tails /logz into Delta
+{{if eq .use_lakebase "yes"}}
+  # ── Lakebase: PG* vars are injected from the bound `lakebase_db` resource
+  # declared in databricks.yml. Never hardcode host/user/database here.
+  - name: PGHOST
+    valueFrom: lakebase_db
+  - name: PGPORT
+    valueFrom: lakebase_db
+  - name: PGUSER
+    valueFrom: lakebase_db
+  - name: PGDATABASE
+    valueFrom: lakebase_db
+  - name: PGAPPNAME
+    value: "{{.app_name}}"{{end}}

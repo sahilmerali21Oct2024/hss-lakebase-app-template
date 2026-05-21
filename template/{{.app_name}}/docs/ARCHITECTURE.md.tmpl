@@ -1,0 +1,201 @@
+# Architecture — Apps on Lakebase
+
+This document answers the questions that came up in the May 20, 2026
+architecture session. It is the single source of truth for **how apps share
+Lakebase**, **how schema changes are promoted**, and **what is governed where**.
+
+If you disagree with anything here, change this file first, not the apps.
+
+---
+
+## 1. Topology: one instance, many databases, one DB per app
+
+```
+                 Lakebase instance: hss-shared-lakebase
+                 ┌──────────────────────────────────────┐
+                 │  database: app_a_db   <- App A only  │
+                 │  database: app_b_db   <- App B only  │
+                 │  database: app_c_db   <- App C only  │
+                 │  database: shared_ref <- read-only   │
+                 │                        cross-app     │
+                 └──────────────────────────────────────┘
+```
+
+**Decisions**
+
+| Question | Decision | Why |
+|---|---|---|
+| Project per app? | **No.** One shared instance per workspace. | Apps are used <5% of the time; an instance per app wastes idle compute and operational overhead. |
+| Database per app? | **Yes.** One logical DB per app. | Schema isolation, per-app roles, no cross-app blast radius on migrations. |
+| Shared tables across apps? | **Reference data only.** Put it in `shared_ref` DB, owned by the platform team, read-only to apps. | Juliana: "you can't have a shared table because the indexes are going to be different on each application." Indexes are per-DB so each app keeps its own. |
+| Synced tables (UC → Lakebase) | **The consuming app owns the sync.** If two apps want the same UC table, each gets its own synced copy in its own DB. | Avoids index/permission collisions. Cost of duplicate sync is small vs. the operational pain of sharing. |
+
+The instance name is a bundle variable (`var.lakebase_instance`,
+default `hss-shared-lakebase`). The database name is per-app
+(`var.lakebase_database`, default `{{.app_name}}_db`).
+
+---
+
+## 2. Environments and branching
+
+Each workspace is its own Lakebase project:
+
+```
+padella-test workspace   ──>   project "hss-shared-lakebase" (dev/test)
+                                  branch: main          (default)
+                                  branch: pr-123        (per-PR, ephemeral)
+                                  branch: pr-124        (per-PR, ephemeral)
+
+padella-prod workspace   ──>   project "hss-shared-lakebase" (prod)
+                                  branch: main                (default)
+                                  branch: rollback-2026-05-20 (snapshot)
+```
+
+**Why per-workspace projects (not one global project)?** Lakebase projects
+are workspace-scoped today. You **cannot** sync a UC table in dev to a
+Lakebase branch in prod, or vice versa. The "branch in prod, test from dev"
+workflow is not supported. If you need to test against a prod-shaped DB,
+take a branch *inside the prod workspace* (`pr-` or `rollback-`) and run
+your test traffic through a dev-mode App in that same prod workspace.
+
+**PR branch lifecycle:**
+
+| Event | Action |
+|---|---|
+| PR opened/updated | `branch-per-pr.yml` creates `pr-<N>` from `main`, runs `alembic upgrade head` against it. |
+| Idle for 30 min | Endpoint scales to zero compute automatically. |
+| PR closed/merged | Branch is deleted. |
+
+**Cost guardrails:**
+
+- A branch costs *storage diff from parent* + *compute when connected*.
+- We enforce a 30-minute idle timeout on PR endpoints in
+  `scripts/lakebase_branch.py`.
+- Confirm pricing with your AE before turning on `branch-per-pr` org-wide.
+
+---
+
+## 3. Schema change & rollback workflow
+
+This is the single most important process to follow. The template enforces
+it via CI, but you still need to understand it.
+
+```
+   Developer                  PR CI                       Deploy CI (main)
+   ─────────                  ─────                       ────────────────
+1. alembic revision -m "..."
+2. edit upgrade() AND
+   downgrade()
+3. git push
+4. open PR     ──────────►   branch-per-pr.yml
+                              creates pr-N branch
+                              runs alembic upgrade head
+                              app boots against pr-N
+                              ── validator blocks PRs whose
+                                 downgrade() is just `pass` ──
+5. review, merge ─────────────────────────────────────►  deploy.yml
+                                                          alembic upgrade head
+                                                          against prod main
+                                                          bundle deploy
+                                                          apply grants
+                                                          restart app
+                                                          smoke test
+```
+
+**Rollback options (pick one — both are scripted):**
+
+1. **Alembic downgrade** — works if the offending revision has a real
+   `downgrade()` (validator enforces this).
+   ```bash
+   python scripts/rollback_migration.py --strategy alembic --revision -1
+   ```
+
+2. **Branch swap** — repoint the app to a pre-deploy snapshot branch.
+   Use this when the data itself is broken, not just the schema.
+   ```bash
+   # before risky deploys, snapshot the prod branch:
+   python scripts/lakebase_branch.py ensure \
+     --instance hss-shared-lakebase --branch rollback-2026-05-20 --parent main
+   # if the deploy goes wrong:
+   python scripts/rollback_migration.py --strategy branch-swap \
+     --branch rollback-2026-05-20
+   ```
+
+---
+
+## 4. Auth pattern
+
+| Operation | Identity | Why |
+|---|---|---|
+| Reads from UC tables | **OBO** (`x-forwarded-access-token`) | UC row filters / column masks / PHI policies apply at query time. |
+| Writes to Lakebase (per-app DB) | **App SP** | Apps own their own DB; users do not need direct Postgres roles. |
+| Cross-app reference reads | **App SP** with read-only grant on `shared_ref`. | |
+| Background jobs / audit log writes | **App SP** | No user context available. |
+
+The dual-mode helpers in `server/auth/` pick the right client automatically:
+
+- `get_obo_client(request)` → user-scoped `WorkspaceClient`
+- `get_sp_client()`         → SP-scoped `WorkspaceClient`
+
+---
+
+## 5. Governance: what is enforced where
+
+| Concern | Enforced in | Notes |
+|---|---|---|
+| Row-level security on patient/PHI data | **UC** (row filters) | Data must be read via OBO from UC; do not land raw PHI in Lakebase. |
+| Column masking | **UC** (column masks) | Same as above. |
+| Tag-based policies | **UC** | Lakebase has no equivalent today. |
+| Per-app DB isolation | **Lakebase** (one DB per app, SP-scoped role) | Enforced by `apply_grants.py`. |
+| Per-user roles inside Lakebase | **App layer** (filter on `x-forwarded-email` / token claim) | Lakebase does not see UC identities natively. |
+| Audit log | **Audit middleware** (every request) → `/logz` → Delta sink | See §6. |
+
+### Data classification rule (binding)
+
+> **Sensitive data (PHI/PII/regulated) stays in Unity Catalog and is read on
+> behalf of the user.** Lakebase is for app state, derived/aggregated data,
+> reference data, and write-back of user actions. Landing sensitive raw data
+> in Lakebase bypasses UC governance — do not do it.
+
+The pre-deploy validator does not (cannot) enforce this — it is a review-time
+rule. Call it out explicitly in PR descriptions when you land new tables.
+
+---
+
+## 6. Logging
+
+Every app uses `AuditLoggerMiddleware`. It writes one JSON line per request
+to stdout:
+
+```json
+{"ts":"2026-05-21T16:00:00Z","app":"my_app","user":"alice@hss.example",
+ "method":"POST","path":"/api/orders","status":200,"ms":42.1,
+ "type":"data_edit","error":null}
+```
+
+A separate `logs-sink/` bundle (committed alongside this template) tails
+`/logz` from every Databricks App and writes into a single UC table:
+
+```
+{{.audit_catalog}}.audit.app_events
+```
+
+Dashboards and alerts live in that bundle. You do not need to wire logging
+yourself — it works as long as you do not remove the middleware from
+`app.py`.
+
+---
+
+## 7. Deploy is the only deploy
+
+There is no manual deploy path. Specifically:
+
+- Do **not** click "Deploy" in the workspace UI.
+- Do **not** run `databricks bundle deploy` from your laptop against prod.
+- Do **not** use the Apps console to upload files.
+
+All four of those failure modes lose env-var injection, skip the grants
+step, skip migrations, and skip the smoke test. The GitHub Actions
+pipeline is the contract.
+
+If GitHub Actions is broken, fix GitHub Actions. Do not bypass it.

@@ -1,0 +1,35 @@
+bundle:
+  name: hss-app-logs-sink
+
+# Deploy once per workspace. Apps emit JSON via AuditLoggerMiddleware;
+# this pipeline lands them into a single audited Delta table.
+
+variables:
+  audit_catalog:
+    description: "UC catalog that owns the audit schema."
+    default: {{.audit_catalog}}
+
+resources:
+  pipelines:
+    app_audit_sink:
+      name: hss-app-audit-sink
+      serverless: true
+      continuous: true
+      catalog: ${var.audit_catalog}
+      target: audit
+      libraries:
+        - file:
+            path: ./pipeline.py
+      configuration:
+        AUDIT_CATALOG: ${var.audit_catalog}
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: {{.dev_workspace_url}}
+  prod:
+    mode: production
+    workspace:
+      host: {{.prod_workspace_url}}

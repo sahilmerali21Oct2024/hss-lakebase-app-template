@@ -36,11 +36,14 @@ app.include_router(health.router)
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return f"""<html><body style="font-family:Arial;padding:40px;background:#0f1117;color:#e1e4e8;">
-    <h1>{{{{.app_name}}}}</h1>
-    <p>App is running. Build your routes in <code>server/routes/</code>.</p>
-    <ul>
-    <li><a href="/api/health" style="color:#58a6ff">/api/health</a></li>
-    <li><a href="/api/env" style="color:#58a6ff">/api/env</a></li>
-    {{{{if eq .use_lakebase "yes"}}}}<li><a href="/api/lakebase/test" style="color:#58a6ff">/api/lakebase/test</a></li>{{{{end}}}}
-    </ul></body></html>"""
+    links = [
+        '<li><a href="/api/health" style="color:#58a6ff">/api/health</a></li>',
+        '<li><a href="/api/env" style="color:#58a6ff">/api/env</a></li>',
+        {{if eq .use_lakebase "yes"}}'<li><a href="/api/lakebase/test" style="color:#58a6ff">/api/lakebase/test</a></li>',{{end}}
+    ]
+    return (
+        '<html><body style="font-family:Arial;padding:40px;background:#0f1117;color:#e1e4e8;">'
+        '<h1>{{.app_name}}</h1>'
+        '<p>App is running. Build your routes in <code>server/routes/</code>.</p>'
+        '<ul>' + ''.join(links) + '</ul></body></html>'
+    )

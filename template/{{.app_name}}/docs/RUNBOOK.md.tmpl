@@ -1,0 +1,155 @@
+# Runbook — common operations
+
+For why this is set up the way it is, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
+---
+
+## First-time setup (per repo, once)
+
+Before the first deploy will work, configure these in GitHub:
+
+**Environments** (Settings → Environments): create `dev` and `prod`.
+
+**Per-environment variables** (Settings → Environments → \<env\> → Variables):
+
+| Variable | Value |
+|---|---|
+| `DATABRICKS_HOST` | workspace URL for that env |
+| `DATABRICKS_CLIENT_ID` | CI service principal client_id |
+| `UC_CATALOG` | catalog name for that env |
+| `UC_WAREHOUSE_ID` | SQL warehouse the CI SP can use for `GRANT` |
+
+**Per-environment secrets**:
+
+| Secret | Value |
+|---|---|
+| `DATABRICKS_CLIENT_SECRET` | CI SP secret |
+
+**One-time platform admin work** (ask the Lakebase admin):
+
+- Make the CI SP an owner of the Lakebase instance, OR
+- Grant the CI SP `CREATEROLE`, `CREATEDB`, and `WITH GRANT OPTION` on the
+  schemas listed in `permissions.yaml`.
+
+Without this, `apply_grants.py` will fail with permission-denied.
+
+---
+
+## Daily flow
+
+### Add a feature that needs a new table
+
+```bash
+# 1. Create a migration
+alembic revision -m "add orders table"
+# edit migrations/versions/<new>.py — implement BOTH upgrade() and downgrade()
+
+# 2. Update permissions.yaml if the schema/table list changed
+
+# 3. Open PR
+git checkout -b feat/orders
+git commit -am "add orders table"
+git push -u origin HEAD
+# open PR — branch-per-pr.yml runs migration against pr-N
+```
+
+PR review checklist (the validator already enforces the mechanical bits):
+
+- [ ] `downgrade()` actually undoes `upgrade()`.
+- [ ] No catalog name, workspace URL, or password literal anywhere outside
+      `databricks.yml`.
+- [ ] If the new table holds sensitive data, it is in UC, not Lakebase.
+- [ ] `permissions.yaml` covers the new schema/table.
+
+Merge → `deploy.yml` runs migrations + deploy + grants + restart + smoke
+test against prod.
+
+---
+
+### Production migration went wrong
+
+```bash
+# Fast path: undo the last migration
+python scripts/rollback_migration.py --strategy alembic --revision -1
+databricks apps restart {{.app_name}}
+
+# Data-corruption path: rebind to a snapshot branch
+#   (assumes you took a snapshot before the deploy — see ARCHITECTURE §3)
+python scripts/rollback_migration.py --strategy branch-swap \
+  --branch rollback-YYYY-MM-DD
+```
+
+After rollback, open a postmortem PR. Do not patch prod-only.
+
+---
+
+### Take a snapshot branch before a risky deploy
+
+```bash
+python scripts/lakebase_branch.py ensure \
+  --instance {{.lakebase_instance_name}} \
+  --branch rollback-$(date +%F) \
+  --parent main \
+  --idle-timeout-min 30
+```
+
+Snapshot branches live until you delete them; they cost storage diff from
+`main`. Clean up monthly.
+
+---
+
+### Grant permissions to a new schema
+
+1. Add the schema to `permissions.yaml`.
+2. Open PR. Validator confirms the YAML parses and the bundle still validates.
+3. Merge. `apply_grants.py` runs as part of the deploy.
+
+You should not have to ask an admin for grants after the first-time setup.
+
+---
+
+### App SP changed (rare)
+
+You don't need to do anything. `apply_grants.py` resolves the SP client_id
+fresh on every deploy via `databricks apps get`.
+
+---
+
+### App can't connect to Lakebase
+
+Check in order:
+
+1. `/api/env` on the running app — are `PGHOST`, `PGUSER`, `PGDATABASE` set?
+   - If not, the `lakebase_db` resource is not bound. Look at the App
+     resource in the workspace UI and reconcile with `databricks.yml`.
+2. `/api/lakebase/test` — does it return `{"status":"error"}`? The error
+   string contains the Postgres error.
+3. Did `apply_grants.py` succeed on the last deploy? Check Actions logs.
+4. Has the OAuth token been refreshed? The pool refreshes every 45 min
+   (`server/db/lakebase.py`). If you see `password authentication failed`
+   continuously, restart the app.
+
+---
+
+### Lakebase branch never deletes after PR close
+
+The PR-close job only runs if the workflow was enabled when the PR was
+opened. Manual cleanup:
+
+```bash
+python scripts/lakebase_branch.py delete \
+  --instance {{.lakebase_instance_name}} \
+  --branch pr-123
+```
+
+---
+
+### Cost spike on Lakebase
+
+Likely causes, in order:
+
+1. A PR branch escaped — list with `databricks postgres list-branches
+   --project {{.lakebase_instance_name}}` and delete stragglers.
+2. Snapshot branches were never cleaned up — same fix.
+3. An app is holding connections open (no idle timeout firing). Check the
+   pool sizing in `server/db/lakebase.py` (default `max_size=10`).

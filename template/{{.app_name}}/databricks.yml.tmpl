@@ -1,0 +1,69 @@
+bundle:
+  name: {{.app_name}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables: every environment-specific value lives here. NEVER hardcode these
+# inside Python or app.yaml — the pre-deploy validator will block the PR.
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  catalog:
+    description: "Unity Catalog for this environment."
+  lakebase_instance:
+    description: "Shared Lakebase database instance name."
+    default: {{.lakebase_instance_name}}
+  lakebase_database:
+    description: "Logical Lakebase database name for this app."
+    default: {{.database_name}}
+  lakebase_branch:
+    description: "Lakebase branch to bind. 'main' for dev/prod; PR workflow overrides per-PR."
+    default: main
+  audit_catalog:
+    description: "UC catalog holding the shared audit.app_events table."
+    default: {{.audit_catalog}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared resource definitions. The app is rebound per target so dev/prod each
+# get their own DB binding without code changes.
+# ─────────────────────────────────────────────────────────────────────────────
+resources:
+  apps:
+    {{.app_name}}:
+      name: {{.app_name}}
+      description: "{{.app_name}} — generated from hss-lakebase-app-template."
+      source_code_path: .
+      {{if eq .use_lakebase "yes"}}resources:
+        - name: lakebase_db
+          description: "Lakebase database binding — injects PGHOST/PGPORT/PGDATABASE/PGUSER."
+          database:
+            database_name: ${var.lakebase_database}
+            instance_name: ${var.lakebase_instance}
+            permission: CAN_CONNECT_AND_CREATE{{end}}
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: {{.dev_workspace_url}}
+    variables:
+      catalog: {{.dev_catalog}}
+      lakebase_branch: main
+
+  prod:
+    mode: production
+    workspace:
+      host: {{.prod_workspace_url}}
+    variables:
+      catalog: {{.prod_catalog}}
+      lakebase_branch: main
+{{if eq .use_lakebase "yes"}}    resources:
+      apps:
+        {{.app_name}}:
+          # In prod, restrict to CAN_CONNECT — schema changes happen via the
+          # migration job, not the app SP.
+          resources:
+            - name: lakebase_db
+              database:
+                database_name: ${var.lakebase_database}
+                instance_name: ${var.lakebase_instance}
+                permission: CAN_CONNECT{{end}}

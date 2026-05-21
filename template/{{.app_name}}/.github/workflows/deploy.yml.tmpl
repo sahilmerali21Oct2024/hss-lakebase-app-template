@@ -1,0 +1,89 @@
+name: Deploy App
+
+# End-to-end deploy:
+#   1. Validate bundle for the target.
+#   2. Run alembic upgrade head against that env's Lakebase branch.
+#   3. databricks bundle deploy.
+#   4. Apply permissions.yaml grants to the freshly-deployed app SP.
+#   5. Restart the app (deploy alone does NOT restart).
+#
+# Designed so manual deploys are unnecessary — and unsafe.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        required: true
+        type: choice
+        options: [dev, prod]
+
+concurrency:
+  group: deploy-${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
+    env:
+      TARGET: ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
+      APP_NAME: {{.app_name}}
+      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_DATABASE: {{.database_name}}
+      LAKEBASE_BRANCH: main
+      DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+      DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
+      DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
+      UC_CATALOG: ${{"{{"}} vars.UC_CATALOG {{"}}"}}
+      UC_WAREHOUSE_ID: ${{"{{"}} vars.UC_WAREHOUSE_ID {{"}}"}}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: pip install -r requirements.txt
+
+      - uses: databricks/setup-cli@main
+
+      - name: Validate bundle
+        run: databricks bundle validate -t $TARGET
+
+      {{if eq .use_lakebase "yes"}}- name: Run database migrations (alembic upgrade head)
+        run: |
+          echo "Migrating Lakebase branch=$LAKEBASE_BRANCH database=$LAKEBASE_DATABASE"
+          alembic upgrade head
+        # Failure here aborts the deploy — the app is NOT restarted on an
+        # uncommitted schema change. Roll back with scripts/rollback_migration.py.
+
+      - name: Show current schema revision
+        run: alembic current{{end}}
+
+      - name: Deploy bundle
+        run: databricks bundle deploy -t $TARGET
+
+      - name: Apply permissions.yaml grants
+        run: python scripts/apply_grants.py --app-name "$APP_NAME"
+
+      - name: Restart app
+        run: databricks apps restart "$APP_NAME"
+
+      - name: Smoke test /api/health
+        run: |
+          set -e
+          for i in 1 2 3 4 5 6; do
+            URL=$(databricks apps get "$APP_NAME" --output json | python -c \
+              "import sys,json;print(json.load(sys.stdin).get('url',''))")
+            if [ -n "$URL" ]; then
+              code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/api/health" || echo 000)
+              echo "attempt $i -> $code"
+              if [ "$code" = "200" ]; then exit 0; fi
+            fi
+            sleep 15
+          done
+          echo "::error::App did not become healthy after deploy."
+          exit 1

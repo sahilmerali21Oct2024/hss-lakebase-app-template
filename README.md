@@ -1,29 +1,25 @@
 # HSS Lakebase App Template
 
-An opinionated starter template for creating new Databricks app projects. It scaffolds the repo, deployment config, environments, and CI/CD so teams can launch new apps consistently. It is not magic app generation -- it standardizes the app foundation and deployment path.
+An opinionated `databricks bundle init` template for Databricks Apps backed
+by Lakebase. It scaffolds the repo, deployment pipeline, schema-migration
+tooling, and governance docs so every new app starts from the same
+production-grade foundation.
 
-## What It Creates
+It is **not** an app generator. It standardizes the *platform* layer so
+teams can build feature code without re-debating ops every time.
 
-When you run `databricks bundle init`, this template generates:
+## What it gives you
 
-- Starter app repo structure (FastAPI + optional frontend)
-- `databricks.yml` with dev and prod targets
-- App config and resource definitions (`app.yaml`)
-- Lakebase connection pattern with OAuth token refresh
-- OBO + SP dual auth modules
-- Audit logging middleware (auto-captures every request)
-- CI/CD workflow scaffolding (GitHub Actions)
-- Pre-deploy validation checks (hardcoded catalogs, credentials)
-- Alembic migration scaffold for schema changes
-- `permissions.yaml` for automated SP grant management
-- Claude instructions (`.claude/CLAUDE.md`) for AI-assisted development
-
-## What It Does Not Do
-
-- Does not generate app business logic -- you build that
-- Does not remove the need to build the actual UI/workflows
-- Does not replace good security and compute design
-- Does not auto-provision Lakebase projects or warehouses
+| Pain point (May 20 session) | What the template ships |
+|---|---|
+| 1. Lakebase project/database organization | One shared instance, one DB per app — documented in `docs/ARCHITECTURE.md` and encoded in `databricks.yml` variables. |
+| 2. Schema changes + rollback in prod | Full Alembic scaffold (`alembic.ini`, `env.py` with OAuth, example migration). `downgrade()` mandatory — enforced by validator. `scripts/rollback_migration.py` supports alembic-downgrade and branch-swap. |
+| 3. Branching model unclear | `branch-per-pr.yml` workflow + `scripts/lakebase_branch.py` create/teardown disposable PR branches with idle-timeout. Cost model documented. |
+| 4. Test → prod promotion broken | `deploy.yml` does `validate → migrate → deploy → grant → restart → smoke-test`. `validate.yml` blocks hardcoded catalogs (now templated to your real catalog names), workspace URLs, credentials, empty downgrades. |
+| 5. App SP permissioning manual | `permissions.yaml` is **actually consumed** by `scripts/apply_grants.py`, which runs as the last step of every deploy. No more "ask Eric." |
+| 6. No standardized template / logging | Common FastAPI structure, OBO + SP auth helpers, `AuditLoggerMiddleware`. Workspace-wide `logs-sink/` SDP pipeline lands all app audit events into one Delta table. |
+| 7. UC ↔ Lakebase governance gap | `docs/DATA_CLASSIFICATION.md` is the binding rule: sensitive data stays in UC, read via OBO. `.claude/CLAUDE.md` enforces in-loop. |
+| 8. Cross-env Lakebase testing limitation | Explicitly documented (`docs/ARCHITECTURE.md §2`) along with the supported alternative (snapshot/PR branches inside the same workspace). |
 
 ## Usage
 
@@ -31,29 +27,68 @@ When you run `databricks bundle init`, this template generates:
 databricks bundle init https://github.com/sahilmerali21Oct2024/hss-lakebase-app-template
 ```
 
-You'll be prompted for:
-- App name
-- Database name
-- Dev and prod workspace URLs
-- Catalog names
-- Whether you need Lakebase and OBO auth
+You'll be prompted for app name, database name, Lakebase instance name,
+dev + prod workspace URLs, dev + prod catalog names, audit catalog, and
+which optional features to enable (Lakebase, OBO, branch-per-PR).
 
 Then:
 
 ```bash
 cd <app_name>
+cat docs/RUNBOOK.md          # first-time GitHub setup
 databricks bundle validate -t dev
 databricks bundle deploy -t dev
+python scripts/apply_grants.py --app-name <app_name>
 ```
 
-## Architecture Pattern
+After the first deploy, **all subsequent deploys go through GitHub
+Actions**. The architecture document explains why.
 
-- 1 shared template repo (this one -- org-wide)
-- 1 repo per app (generated from this template)
-- Shared Lakebase project with branch-per-environment
-- Standard CI/CD: PR → validate + deploy to dev, merge → deploy to prod
-- Heavy compute offloaded to SQL Warehouses / Jobs (app compute is for UI only)
+## Architecture (one diagram)
 
-## One-Line Positioning
+```
+                ┌──────────────────────────────┐
+   PR open ──►  │  branch-per-pr.yml           │  pr-N branch + alembic upgrade
+                └──────────────────────────────┘
+                              │
+                              ▼ (merge)
+                ┌──────────────────────────────┐
+                │  deploy.yml                  │
+                │   validate                   │
+                │   alembic upgrade head       │
+                │   bundle deploy              │
+                │   apply_grants.py            │  ← reads permissions.yaml
+                │   apps restart               │
+                │   smoke-test /api/health     │
+                └──────────────────────────────┘
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  Databricks App        │
+                  │  ─ AuditLogger MW ─────┼──►  /logz  ──►  logs-sink pipeline
+                  │  ─ OBO -> UC reads     │                    │
+                  │  ─ SP  -> Lakebase r/w │                    ▼
+                  └────────────────────────┘          audit.app_events (Delta)
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  Lakebase instance     │
+                  │  (one per workspace)   │
+                  │   ├─ app_a_db          │
+                  │   ├─ app_b_db          │
+                  │   └─ shared_ref        │
+                  └────────────────────────┘
+```
 
-It's a factory template for new Databricks apps -- not an app generator.
+## What it does NOT do
+
+- Does not generate your business logic.
+- Does not replace good security and compute design.
+- Does not auto-provision the Lakebase instance itself, or the SQL
+  warehouse used by the grants script. Those are platform-team
+  one-time setup (documented in `docs/RUNBOOK.md`).
+
+## Architecture one-liner
+
+A factory template for new Databricks apps. The platform is opinionated,
+your feature code is free.

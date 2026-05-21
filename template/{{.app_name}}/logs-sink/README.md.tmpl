@@ -1,0 +1,52 @@
+# logs-sink — central audit log pipeline
+
+This is a **companion** Lakeflow Spark Declarative Pipeline that tails
+`/logz` from every Databricks App in the workspace and writes structured
+audit events into a single Delta table:
+
+```
+{{.audit_catalog}}.audit.app_events
+```
+
+You deploy it **once per workspace**, not per app. Every app in the org
+emits JSON via `AuditLoggerMiddleware` and shows up here.
+
+## What you get
+
+| Column | Type | Source |
+|---|---|---|
+| `ts` | TIMESTAMP | middleware |
+| `app` | STRING | middleware (`APP_NAME` env) |
+| `user` | STRING | `x-forwarded-email` |
+| `method` | STRING | request |
+| `path` | STRING | request |
+| `status` | INT | response |
+| `ms` | DOUBLE | latency |
+| `type` | STRING | classified: `data_access`, `data_edit`, `permission_deny`, `authentication` |
+| `error` | STRING | exception message if any |
+| `_ingest_ts` | TIMESTAMP | pipeline ingest time |
+
+Use cases:
+
+- "Who accessed patient X in the last 30 days?" — SELECT on `user`, `path`.
+- "Show me every permission_deny for app Y this week." — SELECT on `type`.
+- Auto-alert on >N permission_deny events per app per hour.
+
+## Deploy
+
+```bash
+cd logs-sink
+databricks bundle deploy -t prod
+databricks pipelines start --pipeline-id <id-from-deploy-output>
+```
+
+The pipeline is serverless and continuous. It will pick up new apps
+automatically the next time they emit logs — there is no per-app config.
+
+## Source
+
+The pipeline reads from the Apps system table:
+`system.access.app_request_logs` (where `/logz` is materialized) and
+parses the JSON column written by `AuditLoggerMiddleware`. If your
+workspace does not have this system table enabled, ask the workspace
+admin to enable system schemas for `access` and `serving`.
