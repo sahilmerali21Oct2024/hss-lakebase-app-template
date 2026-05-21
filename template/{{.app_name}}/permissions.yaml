@@ -1,0 +1,16 @@
+# Per-app permission declaration
+# CI pipeline reads this and auto-grants after deploy
+
+lakebase:
+  database: "{{.database_name}}"
+  schemas:
+    - name: public
+      grants: [SELECT, INSERT, UPDATE, DELETE]
+
+unity_catalog:
+  dev_catalog: "{{.dev_catalog}}"
+  prod_catalog: "{{.prod_catalog}}"
+  schemas: []
+  # Add UC schemas your app needs:
+  # - name: rev_cycle
+  #   grants: [USE_SCHEMA, SELECT]

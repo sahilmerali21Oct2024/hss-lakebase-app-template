@@ -1,0 +1,33 @@
+name: Deploy App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        required: true
+        type: choice
+        options: [dev, prod]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+
+      - name: Deploy
+        run: databricks bundle deploy -t ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
+        env:
+          DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+          DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
+
+      - name: Restart app
+        run: |
+          databricks apps restart {{.app_name}} || true
+        env:
+          DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+          DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}

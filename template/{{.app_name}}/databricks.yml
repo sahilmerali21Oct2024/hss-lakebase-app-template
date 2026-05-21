@@ -1,0 +1,39 @@
+bundle:
+  name: {{.app_name}}
+
+targets:
+  dev:
+    workspace:
+      host: {{.dev_workspace_url}}
+    resources:
+      apps:
+        {{.app_name}}:
+          source_code_path: .
+          config:
+            command:
+              - python
+              - -m
+              - uvicorn
+              - app:app
+              - --host
+              - "0.0.0.0"
+              - --port
+              - "8000"
+
+  prod:
+    workspace:
+      host: {{.prod_workspace_url}}
+    resources:
+      apps:
+        {{.app_name}}:
+          source_code_path: .
+          config:
+            command:
+              - python
+              - -m
+              - uvicorn
+              - app:app
+              - --host
+              - "0.0.0.0"
+              - --port
+              - "8000"

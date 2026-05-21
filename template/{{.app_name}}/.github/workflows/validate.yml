@@ -1,0 +1,44 @@
+name: Pre-Deploy Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for hardcoded catalogs
+        run: |
+          VIOLATIONS=$(grep -rn "padella_test\|padella_prod" \
+            --include="*.py" --include="*.yaml" --include="*.yml" \
+            --exclude="databricks.yml" --exclude="permissions.yaml" . || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "BLOCKED: Hardcoded catalog references found outside targets:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+
+      - name: Check for hardcoded credentials
+        run: |
+          VIOLATIONS=$(grep -rn "dapi[a-f0-9]\{32\}\|Bearer [a-zA-Z0-9]\{20,\}" \
+            --include="*.py" --include="*.yaml" . || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "BLOCKED: Possible hardcoded credentials:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+
+      - name: Verify host/port binding
+        run: |
+          grep -q "0.0.0.0" app.yaml && grep -q "8000" app.yaml || \
+            (echo "app.yaml must bind to 0.0.0.0:8000" && exit 1)
+
+      - uses: databricks/setup-cli@main
+      - name: Validate bundle
+        run: databricks bundle validate -t dev
+        env:
+          DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+          DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}

@@ -1,0 +1,51 @@
+{
+  "properties": {
+    "app_name": {
+      "type": "string",
+      "description": "Application name (lowercase, hyphens ok)",
+      "order": 1
+    },
+    "database_name": {
+      "type": "string",
+      "description": "Lakebase database name for this app",
+      "default": "{{.app_name}}_db",
+      "order": 2
+    },
+    "dev_workspace_url": {
+      "type": "string",
+      "description": "Dev/test workspace URL (e.g., https://padella-test.cloud.databricks.com)",
+      "order": 3
+    },
+    "prod_workspace_url": {
+      "type": "string",
+      "description": "Prod workspace URL (e.g., https://padella-prod.cloud.databricks.com)",
+      "order": 4
+    },
+    "dev_catalog": {
+      "type": "string",
+      "description": "Unity Catalog name in dev workspace",
+      "default": "padella_test",
+      "order": 5
+    },
+    "prod_catalog": {
+      "type": "string",
+      "description": "Unity Catalog name in prod workspace",
+      "default": "padella_prod",
+      "order": 6
+    },
+    "use_lakebase": {
+      "type": "string",
+      "description": "Does this app use Lakebase? (yes/no)",
+      "default": "yes",
+      "enum": ["yes", "no"],
+      "order": 7
+    },
+    "use_obo": {
+      "type": "string",
+      "description": "Does this app need On-Behalf-Of user auth? (yes/no)",
+      "default": "yes",
+      "enum": ["yes", "no"],
+      "order": 8
+    }
+  }
+}
