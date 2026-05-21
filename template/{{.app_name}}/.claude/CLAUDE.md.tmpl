@@ -62,12 +62,16 @@ Before changing anything Lakebase-related, read:
 
 - **The only deploy path is GitHub Actions** (`.github/workflows/deploy.yml`).
   No manual `databricks bundle deploy` from laptops, no UI uploads, no
-  "click restart". Bypassing the pipeline skips migrations, grants, and
-  the smoke test.
+  "click restart". The app's startup self-check enforces this: if
+  `EXPECTED_GIT_SHA` is missing (which it always is on manual deploys),
+  the app exits immediately. See `docs/PROD_LOCKDOWN.md`.
 - All environment-specific values live in `databricks.yml` under
-  `variables` / `targets`. The validator blocks PRs that hardcode a
-  catalog name, workspace URL, or token.
+  `variables` / `targets`. The validator (`scripts/run_validators.sh`)
+  blocks PRs *and* direct-to-main pushes that hardcode a catalog name,
+  workspace URL, or token. Same rules everywhere.
 - `app.yaml` must bind `0.0.0.0:8000`. Validator enforces.
+- Sensitive paths (workflows, databricks.yml, migrations) require
+  platform-team review per `.github/CODEOWNERS`.
 
 ## Tests
 

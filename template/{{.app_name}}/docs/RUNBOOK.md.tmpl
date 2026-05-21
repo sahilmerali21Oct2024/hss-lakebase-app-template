@@ -8,6 +8,26 @@ For why this is set up the way it is, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 Before the first deploy will work, configure these in GitHub:
 
+**Branch protection + environment rules** (one command):
+
+```bash
+export GITHUB_TOKEN=<pat with repo + admin:org>
+python scripts/setup_branch_protection.py \
+    --repo {{.github_org_repo}} \
+    --team {{.github_codeowners_team}}
+```
+
+This applies:
+- `main` requires PR + CODEOWNERS review + passing validators.
+- `prod` environment requires platform-team approval + 5-min cooling window.
+- Both environments are restricted to deploys from `main`.
+
+**Workspace-side lockdown** (one-time per workspace, done by the workspace
+admin): see [`PROD_LOCKDOWN.md`](./PROD_LOCKDOWN.md). Without this, manual
+deploys from a laptop or the workspace UI still succeed.
+
+
+
 **Environments** (Settings → Environments): create `dev` and `prod`.
 
 **Per-environment variables** (Settings → Environments → \<env\> → Variables):

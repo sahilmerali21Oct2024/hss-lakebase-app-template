@@ -1,100 +1,32 @@
 name: Pre-Deploy Validation
 
+# Runs on every PR. The SAME checks also run as a gate job inside deploy.yml,
+# so even a direct push to main that skips the PR cannot reach `bundle deploy`
+# without passing them.
 on:
   pull_request:
     branches: [main]
 
-# Block PRs that contain the failure modes Juliana flagged: hardcoded
-# environment values, leaked credentials, or app.yaml drift.
 jobs:
   validate:
     runs-on: ubuntu-latest
-    env:
-      DEV_CATALOG: {{.dev_catalog}}
-      PROD_CATALOG: {{.prod_catalog}}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Check for hardcoded catalog references
-        run: |
-          set -e
-          PATTERN="${DEV_CATALOG}|${PROD_CATALOG}"
-          VIOLATIONS=$(grep -rnE "$PATTERN" \
-            --include="*.py" --include="*.yaml" --include="*.yml" \
-            --exclude="databricks.yml" \
-            --exclude="permissions.yaml" \
-            --exclude-dir=".github" \
-            --exclude-dir=".git" \
-            --exclude-dir="node_modules" \
-            . || true)
-          if [ -n "$VIOLATIONS" ]; then
-            echo "::error::Hardcoded catalog references found. Move them to databricks.yml variables."
-            echo "$VIOLATIONS"
-            exit 1
-          fi
+      - name: Install pyyaml
+        run: pip install pyyaml
 
-      - name: Check for hardcoded workspace hosts
-        run: |
-          set -e
-          VIOLATIONS=$(grep -rnE "https://[a-zA-Z0-9._-]+\.cloud\.databricks\.com" \
-            --include="*.py" --include="*.yaml" --include="*.yml" \
-            --exclude="databricks.yml" \
-            --exclude-dir=".github" \
-            --exclude-dir=".git" \
-            . || true)
-          if [ -n "$VIOLATIONS" ]; then
-            echo "::error::Hardcoded workspace URLs found. Use DATABRICKS_HOST."
-            echo "$VIOLATIONS"
-            exit 1
-          fi
-
-      - name: Check for hardcoded credentials
-        run: |
-          set -e
-          VIOLATIONS=$(grep -rnE "dapi[a-f0-9]{32}|Bearer [a-zA-Z0-9]{20,}|password\s*=\s*['\"]" \
-            --include="*.py" --include="*.yaml" --include="*.yml" \
-            --exclude-dir=".git" \
-            . || true)
-          if [ -n "$VIOLATIONS" ]; then
-            echo "::error::Possible hardcoded credentials."
-            echo "$VIOLATIONS"
-            exit 1
-          fi
-
-      - name: Verify app.yaml host/port binding
-        run: |
-          grep -q "0.0.0.0" app.yaml && grep -q "8000" app.yaml || \
-            (echo "::error::app.yaml must bind 0.0.0.0:8000" && exit 1)
-
-      - name: Verify permissions.yaml exists and is parseable
-        run: |
-          python -c "import yaml; yaml.safe_load(open('permissions.yaml'))"
-
-      - name: Verify every migration has a real downgrade()
-        run: |
-          set -e
-          BAD=$(python - <<'PY'
-          import ast, pathlib, sys
-          bad = []
-          for p in pathlib.Path("migrations/versions").glob("*.py"):
-              tree = ast.parse(p.read_text())
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.FunctionDef) and node.name == "downgrade":
-                      if (
-                          len(node.body) == 1
-                          and isinstance(node.body[0], ast.Pass)
-                      ):
-                          bad.append(str(p))
-          print("\n".join(bad))
-          PY
-          )
-          if [ -n "$BAD" ]; then
-            echo "::error::These migrations have empty downgrade() — rollback impossible:"
-            echo "$BAD"
-            exit 1
-          fi
+      - name: Run shared validators
+        env:
+          DEV_CATALOG: {{.dev_catalog}}
+          PROD_CATALOG: {{.prod_catalog}}
+        run: bash scripts/run_validators.sh
 
       - uses: databricks/setup-cli@main
+
       - name: Validate bundle (dev)
         run: databricks bundle validate -t dev
         env:

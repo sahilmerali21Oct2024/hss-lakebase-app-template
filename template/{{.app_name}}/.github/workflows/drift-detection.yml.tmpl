@@ -1,0 +1,94 @@
+name: Drift Detection
+
+# Hourly: compares each environment's deployed app SHA to the tip of `main`.
+# If they diverge, someone deployed manually -> post to Slack + open an issue.
+#
+# This is the backstop for the cases the in-app self-check cannot cover
+# (e.g., the app was patched directly in the workspace UI).
+#
+# Required vars:
+#   vars.DATABRICKS_HOST            (per environment)
+#   vars.DATABRICKS_CLIENT_ID       (per environment)
+#   secrets.DATABRICKS_CLIENT_SECRET(per environment)
+# Optional vars (skip the alert step if unset):
+#   vars.SLACK_WEBHOOK_URL          (Slack incoming webhook; or use GITHUB_TOKEN
+#                                    issue creation only)
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour at :00
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dev, prod]
+    runs-on: ubuntu-latest
+    environment: ${{"{{"}} matrix.target {{"}}"}}
+    env:
+      APP_NAME: {{.app_name}}
+      DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
+      DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
+      DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+
+      - name: Resolve deployed SHA + main SHA
+        id: shas
+        run: |
+          set -e
+          DEPLOYED_SHA=$(databricks apps get "$APP_NAME" --output json | \
+            python -c "import sys,json,os; d=json.load(sys.stdin); \
+              env=(d.get('config') or {}).get('env') or []; \
+              v={e['name']:e.get('value') for e in env}; \
+              print(v.get('EXPECTED_GIT_SHA','MISSING'))")
+          MAIN_SHA=$(git rev-parse origin/main)
+          echo "deployed=$DEPLOYED_SHA" >> "$GITHUB_OUTPUT"
+          echo "main=$MAIN_SHA"         >> "$GITHUB_OUTPUT"
+          echo "Target=${{"{{"}} matrix.target {{"}}"}}  deployed=$DEPLOYED_SHA  main=$MAIN_SHA"
+
+      - name: Compare
+        id: cmp
+        run: |
+          if [ "${{"{{"}} steps.shas.outputs.deployed {{"}}"}}" = "${{"{{"}} steps.shas.outputs.main {{"}}"}}" ]; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post Slack alert
+        if: steps.cmp.outputs.drift == 'true' && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{"{{"}} vars.SLACK_WEBHOOK_URL {{"}}"}}
+        run: |
+          curl -X POST -H 'Content-Type: application/json' \
+            --data "{\"text\":\":rotating_light: *Drift detected* on \`$APP_NAME\` (${{"{{"}} matrix.target {{"}}"}})\n  deployed SHA: \`${{"{{"}} steps.shas.outputs.deployed {{"}}"}}\`\n  main SHA:     \`${{"{{"}} steps.shas.outputs.main {{"}}"}}\`\nSomeone deployed manually. Run \`gh workflow run deploy.yml\` to reconcile.\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Open GitHub issue
+        if: steps.cmp.outputs.drift == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Drift detected on ${{"{{"}} matrix.target {{"}}"}}: ${process.env.APP_NAME}`;
+            const body  = [
+              `**Target:** \`${{"{{"}} matrix.target {{"}}"}}\``,
+              `**Deployed SHA:** \`${{"{{"}} steps.shas.outputs.deployed {{"}}"}}\``,
+              `**Main SHA:**     \`${{"{{"}} steps.shas.outputs.main {{"}}"}}\``,
+              ``,
+              `Someone deployed this app outside the CI pipeline.`,
+              `Run \`gh workflow run deploy.yml -f target=${{"{{"}} matrix.target {{"}}"}}\` to reconcile.`,
+              `See docs/PROD_LOCKDOWN.md.`
+            ].join("\n");
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "drift"
+            });
+            if (existing.data.find(i => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title, body, labels: ["drift", "${{"{{"}} matrix.target {{"}}"}}"]
+            });

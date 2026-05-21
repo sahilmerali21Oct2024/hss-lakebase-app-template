@@ -65,6 +65,18 @@
       "default": "yes",
       "enum": ["yes", "no"],
       "order": 11
+    },
+    "github_codeowners_team": {
+      "type": "string",
+      "description": "GitHub team (org/slug) that owns deploy + governance files. e.g. hss-platform/platform",
+      "default": "hss-platform/platform",
+      "order": 12
+    },
+    "github_org_repo": {
+      "type": "string",
+      "description": "GitHub <org>/<repo> for this app (used by drift-detection workflow + setup_branch_protection.py)",
+      "default": "hss-platform/{{.app_name}}",
+      "order": 13
     }
   }
 }

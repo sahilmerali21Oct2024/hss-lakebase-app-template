@@ -1,0 +1,155 @@
+# Prod Lockdown — workspace-side enforcement
+
+This is the **single most important operational document** in the repo. Without
+the steps here, every other safeguard (validators, PR review, branch protection,
+the in-app SHA check) can be bypassed by anyone with workspace write access.
+
+The pipeline catches *mistakes*. This document is what catches *deliberate
+bypasses* — the case Mark and Juliana run into when someone "just deploys
+real quick to prod" and breaks it.
+
+---
+
+## The three layers of enforcement
+
+| Layer | Where | Who configures | What it blocks |
+|---|---|---|---|
+| 1. Pipeline | `.github/workflows/` | repo author | Hardcoded values, empty downgrades, missing grants |
+| 2. GitHub | repo settings | `scripts/setup_branch_protection.py` | Direct push to main, unreviewed merges, force-push |
+| 3. **Workspace** | Databricks workspace permissions | **this document** | Manual `bundle deploy`, workspace-UI uploads, ad hoc Lakebase ALTERs |
+
+Layers 1 and 2 are software. Layer 3 is admin work. **All three must be in
+place.** Skipping layer 3 makes the others largely ceremonial.
+
+---
+
+## One-time per workspace — admin checklist
+
+### Apps
+
+```sh
+# 1. Identify the CI service principal.
+CI_SP=<service-principal-client-id>
+
+# 2. Remove human CAN_MANAGE from every existing prod app.
+for app in $(databricks apps list --output json | jq -r '.[].name'); do
+    # leave only the CI SP with CAN_MANAGE
+    databricks permissions set apps "$app" \
+        --json "{
+          \"access_control_list\": [
+            {\"service_principal_name\": \"$CI_SP\", \"permission_level\": \"CAN_MANAGE\"}
+          ]
+        }"
+done
+
+# 3. Block humans from creating new apps directly (must go through CI).
+# Workspace setting: "Apps -> Create" entitlement -> grant only to CI SP group.
+```
+
+### Lakebase
+
+```sh
+INSTANCE={{.lakebase_instance_name}}
+
+# Owner = CI SP. Humans get CAN_USE at most.
+databricks postgres update-instance "$INSTANCE" \
+  --owner-service-principal-id "$CI_SP"
+
+databricks permissions set lakebase-instance "$INSTANCE" \
+  --json "{
+    \"access_control_list\": [
+      {\"service_principal_name\": \"$CI_SP\", \"permission_level\": \"CAN_MANAGE\"}
+    ]
+  }"
+```
+
+### Workspace files
+
+Humans must not write under the Git Folder path that the app deploys from.
+This prevents in-place edits in the workspace UI.
+
+```sh
+# Replace with your actual Git Folder path
+GIT_FOLDER=/Workspace/Repos/hss-platform/{{.app_name}}
+
+databricks workspace set-permissions "$GIT_FOLDER" \
+  --json "{
+    \"access_control_list\": [
+      {\"service_principal_name\": \"$CI_SP\", \"permission_level\": \"CAN_MANAGE\"},
+      {\"group_name\":              \"hss-app-readers\", \"permission_level\": \"CAN_READ\"}
+    ]
+  }"
+```
+
+### Audit alert (the real-time tripwire)
+
+Create a Lakeflow alert on `system.access.audit` that pages the platform team
+whenever someone other than the CI SP touches an App or Lakebase resource:
+
+```sql
+-- Save as a Lakeflow alert with severity = high, recipient = platform team
+SELECT
+  event_time,
+  user_identity.email AS who,
+  action_name,
+  request_params:name AS target,
+  request_params
+FROM system.access.audit
+WHERE event_date >= current_date() - INTERVAL 1 DAY
+  AND service_name IN ('apps', 'postgres')
+  AND action_name IN (
+    'updateApp', 'deployApp', 'restartApp',
+    'updatePostgresInstance', 'updatePostgresBranch', 'deletePostgresBranch'
+  )
+  AND user_identity.email NOT IN (
+    '<ci-sp-email>',
+    '<platform-admin-email>'
+  )
+ORDER BY event_time DESC;
+```
+
+When this alert fires you have **two pieces of evidence**: who tried to
+bypass (from the audit row) and whether they succeeded (the app's in-process
+self-check will have killed the app if so).
+
+---
+
+## Verifying the lockdown is in place
+
+After completing the steps above, the `hss-app audit` CLI (when shipped)
+will check each of these and flag any drift. Until then, verify manually
+once per quarter:
+
+```sh
+# Should return ONLY the CI SP for every prod app:
+databricks apps list --output json | \
+  jq -r '.[].name' | \
+  while read app; do
+    echo "=== $app ==="
+    databricks permissions get apps "$app" \
+      --output json | jq '.access_control_list'
+  done
+
+# Should show owner = CI SP:
+databricks postgres get-instance {{.lakebase_instance_name}} | jq .owner
+```
+
+---
+
+## Why each layer matters
+
+| Bypass attempt | What stops it |
+|---|---|
+| `databricks bundle deploy -t prod` from laptop | Workspace permission (layer 3) — human lacks CAN_MANAGE on prod app |
+| Workspace-UI file edit | Workspace permission (layer 3) — human lacks write on Git Folder |
+| Force push to `main` | GitHub branch protection (layer 2) |
+| Direct commit to `main` | GitHub branch protection (layer 2) — requires PR |
+| PR merged without review | GitHub CODEOWNERS (layer 2) |
+| PR with hardcoded values | Validator in PR + deploy gate (layer 1) |
+| Migration with empty `downgrade()` | Validator AST check (layer 1) |
+| App deployed manually but with valid code | In-app `EXPECTED_GIT_SHA` self-check refuses to start |
+| Manual Lakebase ALTER on prod | Lakebase ownership = CI SP (layer 3) + audit alert |
+
+If any column in this table doesn't have an entry, that's a gap. Right now
+the table is complete only after a workspace admin completes this document's
+checklist.

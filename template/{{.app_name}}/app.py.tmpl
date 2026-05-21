@@ -1,19 +1,51 @@
 """{{.app_name}} -- FastAPI entry point.
 
 Generated from hss-lakebase-app-template.
-Includes: audit logging middleware, Lakebase connection, OBO + SP auth, health routes.
-Build your app logic in server/routes/.
+Includes: audit logging middleware, Lakebase connection, OBO + SP auth, health routes,
+and a startup self-check that refuses to run if the app was deployed without going
+through the CI pipeline. See docs/PROD_LOCKDOWN.md for the full enforcement model.
 """
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import os
+import sys
 
 from server.middleware.audit_logger import AuditLoggerMiddleware
 from server.routes import health
 
 {{if eq .use_lakebase "yes"}}from server.db.lakebase import db{{end}}
+
+
+def _enforce_ci_deploy() -> None:
+    """Refuse to start if EXPECTED_GIT_SHA was not injected by the CI pipeline.
+
+    The CI deploy job patches this env var into the App resource AFTER a successful
+    bundle deploy. A manual `bundle deploy` or workspace-UI upload never sets it.
+    If you see this app failing to start, someone deployed manually — open a PR
+    and let the GitHub Actions pipeline redeploy it.
+
+    Set ALLOW_UNVERIFIED_DEPLOY=1 only for local development.
+    """
+    if os.environ.get("ALLOW_UNVERIFIED_DEPLOY") == "1":
+        return
+    if not os.environ.get("DATABRICKS_APP_NAME"):
+        return  # local dev — no enforcement
+    expected = os.environ.get("EXPECTED_GIT_SHA")
+    if not expected:
+        print(
+            "BLOCKED: this app was deployed without going through the CI pipeline.\n"
+            "The EXPECTED_GIT_SHA env var is missing. Manual `databricks bundle deploy`\n"
+            "and workspace-UI uploads do not set it. Open a PR and let the GitHub\n"
+            "Actions deploy workflow run instead. See docs/PROD_LOCKDOWN.md.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
+
+
+_enforce_ci_deploy()
 
 
 @asynccontextmanager

@@ -1,13 +1,12 @@
 name: Deploy App
 
 # End-to-end deploy:
-#   1. Validate bundle for the target.
-#   2. Run alembic upgrade head against that env's Lakebase branch.
-#   3. databricks bundle deploy.
-#   4. Apply permissions.yaml grants to the freshly-deployed app SP.
-#   5. Restart the app (deploy alone does NOT restart).
+#   1. VALIDATE (gate) — same checks as PR validator, runs even on direct-to-main pushes.
+#   2. DEPLOY — migrate -> bundle deploy -> grants -> restart -> smoke -> record SHA.
 #
-# Designed so manual deploys are unnecessary — and unsafe.
+# The deploy job depends on validate, so a failed validator aborts the deploy.
+# A manual `bundle deploy -t prod` from a laptop bypasses this entirely — for
+# that, see docs/PROD_LOCKDOWN.md (workspace-side enforcement).
 on:
   push:
     branches: [main]
@@ -24,7 +23,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pyyaml
+        run: pip install pyyaml
+
+      - name: Run shared validators
+        env:
+          DEV_CATALOG: {{.dev_catalog}}
+          PROD_CATALOG: {{.prod_catalog}}
+        run: bash scripts/run_validators.sh
+
   deploy:
+    needs: validate
     runs-on: ubuntu-latest
     environment: ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
     env:
@@ -68,6 +85,30 @@ jobs:
 
       - name: Apply permissions.yaml grants
         run: python scripts/apply_grants.py --app-name "$APP_NAME"
+
+      - name: Inject EXPECTED_GIT_SHA into the app
+        # Patches the deployed app's env so the in-process self-check can refuse
+        # to start if someone later does a manual redeploy from a different SHA.
+        run: |
+          python - <<PY
+          import os, json, subprocess
+          sha = os.environ["GITHUB_SHA"]
+          app = os.environ["APP_NAME"]
+          subprocess.run(
+              ["databricks", "apps", "update", app,
+               "--update-mask", "config.env",
+               "--json", json.dumps({
+                   "config": {
+                       "env": [
+                           {"name": "EXPECTED_GIT_SHA", "value": sha},
+                           {"name": "DEPLOY_TIMESTAMP",
+                            "value": os.environ.get("GITHUB_RUN_ID", "")},
+                       ]
+                   }
+               })],
+              check=True,
+          )
+          PY
 
       - name: Restart app
         run: databricks apps restart "$APP_NAME"

@@ -1,0 +1,25 @@
+# Sensitive paths require platform-team review.
+# This is one of the layers protecting prod from accidental or deliberate bypass.
+# See docs/PROD_LOCKDOWN.md for the full enforcement model.
+
+# Deploy + CI machinery: the only path to prod
+/.github/workflows/                  {{.github_codeowners_team}}
+/.github/CODEOWNERS                  {{.github_codeowners_team}}
+/scripts/                            {{.github_codeowners_team}}
+
+# Bundle + resource bindings: change these and you change prod
+/databricks.yml                      {{.github_codeowners_team}}
+/app.yaml                            {{.github_codeowners_team}}
+/permissions.yaml                    {{.github_codeowners_team}}
+
+# Schema changes: irreversible if downgrade is bad
+/migrations/                         {{.github_codeowners_team}}
+/alembic.ini                         {{.github_codeowners_team}}
+
+# Governance documents
+/docs/ARCHITECTURE.md                {{.github_codeowners_team}}
+/docs/DATA_CLASSIFICATION.md         {{.github_codeowners_team}}
+/docs/PROD_LOCKDOWN.md               {{.github_codeowners_team}}
+/.claude/CLAUDE.md                   {{.github_codeowners_team}}
+
+# Everything else (routes, UI, business logic) is fair game for any developer.
