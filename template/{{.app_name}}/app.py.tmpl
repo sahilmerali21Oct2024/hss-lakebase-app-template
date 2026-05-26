@@ -15,7 +15,7 @@ import sys
 from server.middleware.audit_logger import AuditLoggerMiddleware
 from server.routes import health
 
-{{if eq .use_lakebase "yes"}}from server.db.lakebase import db{{end}}
+from server.db.lakebase import db
 
 
 def _enforce_ci_deploy() -> None:
@@ -50,10 +50,10 @@ _enforce_ci_deploy()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    {{if eq .use_lakebase "yes"}}await db.get_pool()
-    print(f"App started. Lakebase: {'connected' if not db.is_demo_mode else 'demo mode'}"){{else}}print("App started."){{end}}
+    await db.get_pool()
+    print(f"App started. Lakebase: {'connected' if not db.is_demo_mode else 'demo mode'}")
     yield
-    {{if eq .use_lakebase "yes"}}await db.close(){{end}}
+    await db.close()
     print("App shut down.")
 
 
@@ -71,7 +71,7 @@ async def root():
     links = [
         '<li><a href="/api/health" style="color:#58a6ff">/api/health</a></li>',
         '<li><a href="/api/env" style="color:#58a6ff">/api/env</a></li>',
-        {{if eq .use_lakebase "yes"}}'<li><a href="/api/lakebase/test" style="color:#58a6ff">/api/lakebase/test</a></li>',{{end}}
+        '<li><a href="/api/lakebase/test" style="color:#58a6ff">/api/lakebase/test</a></li>',
     ]
     return (
         '<html><body style="font-family:Arial;padding:40px;background:#0f1117;color:#e1e4e8;">'

@@ -2,81 +2,88 @@
   "properties": {
     "app_name": {
       "type": "string",
-      "description": "Application name (lowercase, hyphens ok)",
+      "description": "Application name (lowercase, hyphens ok). e.g. claims-triage",
       "order": 1
+    },
+    "use_case_group": {
+      "type": "string",
+      "description": "Use-case group this app belongs to. Apps in the same group share one Lakebase project, can read each other's reference data, and share AD groups. Convention: lowercase, hyphens, <=63 chars. e.g. clinical-informatics, rev-cycle-analytics, dicom-imaging",
+      "default": "clinical-informatics",
+      "order": 2
     },
     "database_name": {
       "type": "string",
-      "description": "Lakebase logical database name for this app (one DB per app, shared instance)",
+      "description": "Lakebase database name for this app within the use-case-group project (one DB per app on the production branch)",
       "default": "{{.app_name}}_db",
-      "order": 2
-    },
-    "lakebase_instance_name": {
-      "type": "string",
-      "description": "Shared Lakebase database instance name (one instance per workspace, many DBs)",
-      "default": "hss-shared-lakebase",
       "order": 3
+    },
+    "needs_shared_reference_data": {
+      "type": "string",
+      "description": "Does this app read from the use-case-group's shared reference database (synced UC tables that all apps in the group share)? (yes/no)",
+      "default": "no",
+      "enum": ["yes", "no"],
+      "order": 4
     },
     "dev_workspace_url": {
       "type": "string",
-      "description": "Dev/test workspace URL (e.g., https://padella-test.cloud.databricks.com)",
-      "order": 4
+      "description": "Dev workspace URL (e.g., https://hss-dev.cloud.databricks.com)",
+      "order": 5
     },
     "prod_workspace_url": {
       "type": "string",
-      "description": "Prod workspace URL (e.g., https://padella-prod.cloud.databricks.com)",
-      "order": 5
+      "description": "Prod workspace URL (e.g., https://hss-prod.cloud.databricks.com)",
+      "order": 6
     },
     "dev_catalog": {
       "type": "string",
-      "description": "Unity Catalog name in dev workspace",
-      "default": "padella_test",
-      "order": 6
+      "description": "Unity Catalog name in dev workspace (for app's UC reads/writes; separate from Lakebase)",
+      "default": "hss_dev",
+      "order": 7
     },
     "prod_catalog": {
       "type": "string",
       "description": "Unity Catalog name in prod workspace",
-      "default": "padella_prod",
-      "order": 7
+      "default": "hss_prod",
+      "order": 8
     },
     "audit_catalog": {
       "type": "string",
-      "description": "UC catalog that holds the central audit.app_events table (shared across apps)",
+      "description": "UC catalog that holds the central audit.app_events table (shared across all HSS apps and use-case groups)",
       "default": "hss_platform",
-      "order": 8
-    },
-    "use_lakebase": {
-      "type": "string",
-      "description": "Does this app use Lakebase? (yes/no)",
-      "default": "yes",
-      "enum": ["yes", "no"],
       "order": 9
     },
     "use_obo": {
       "type": "string",
-      "description": "Does this app need On-Behalf-Of user auth? (yes/no)",
+      "description": "Does this app need On-Behalf-Of user auth for UC reads? (yes/no) — yes when end users have per-row UC permissions you want enforced",
       "default": "yes",
       "enum": ["yes", "no"],
       "order": 10
     },
-    "enable_branch_per_pr": {
+    "expose_data_api": {
       "type": "string",
-      "description": "Create a Lakebase branch per PR for safe migration testing? (yes/no)",
-      "default": "yes",
+      "description": "Expose this app's Lakebase database via the Lakebase Data API (PostgREST)? (yes/no) — opt-in for apps that want direct REST access to tables instead of (or in addition to) FastAPI",
+      "default": "no",
       "enum": ["yes", "no"],
       "order": 11
+    },
+    "enable_branch_per_pr": {
+      "type": "string",
+      "description": "Create an ephemeral Lakebase child branch per PR (off production) for safe migration testing? (yes/no)",
+      "default": "yes",
+      "enum": ["yes", "no"],
+      "order": 12
     },
     "github_codeowners_team": {
       "type": "string",
       "description": "GitHub team (org/slug) that owns deploy + governance files. e.g. hss-platform/platform",
       "default": "hss-platform/platform",
-      "order": 12
+      "order": 13
     },
     "github_org_repo": {
       "type": "string",
       "description": "GitHub <org>/<repo> for this app (used by drift-detection workflow + setup_branch_protection.py)",
       "default": "hss-platform/{{.app_name}}",
-      "order": 13
+      "order": 14
     }
   }
 }

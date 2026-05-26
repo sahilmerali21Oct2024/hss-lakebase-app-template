@@ -3,11 +3,12 @@
 Lakebase OAuth tokens are short-lived, so we cannot store a static
 sqlalchemy.url. Instead we resolve host + token at runtime from:
 
-    LAKEBASE_INSTANCE   (env)  -> shared instance name
-    LAKEBASE_DATABASE   (env)  -> per-app logical DB
-    LAKEBASE_BRANCH     (env)  -> 'main' (or 'pr-<n>' for PR builds)
+    LAKEBASE_PROJECT    (env)  -> use-case-group project
+    LAKEBASE_BRANCH     (env)  -> 'production' (or 'pr-<n>' for PR builds)
+    LAKEBASE_DATABASE   (env)  -> per-app logical DB inside the branch
 
-The CI SP must already have privileges on the target database.
+The CI SP must already have privileges on the target database (provisioned
+by scripts/apply_grants.py during the deploy workflow).
 """
 
 from __future__ import annotations
@@ -27,14 +28,21 @@ target_metadata = None  # plug in your SQLAlchemy MetaData if you adopt ORM
 
 
 def _build_url() -> str:
-    instance = os.environ["LAKEBASE_INSTANCE"]
+    project = os.environ["LAKEBASE_PROJECT"]
+    branch = os.environ.get("LAKEBASE_BRANCH", "production")
     database = os.environ["LAKEBASE_DATABASE"]
-    branch = os.environ.get("LAKEBASE_BRANCH", "main")
 
     w = WorkspaceClient()
-    endpoint = f"projects/{instance}/branches/{branch}/endpoints/primary"
-    ep = w.postgres.get_endpoint(name=endpoint)
-    cred = w.postgres.generate_database_credential(endpoint=endpoint)
+    branch_path = f"projects/{project}/branches/{branch}"
+    endpoints = list(w.postgres.list_endpoints(parent=branch_path))
+    if not endpoints:
+        raise RuntimeError(f"No endpoints on {branch_path}")
+    ep_name = next(
+        (e.name for e in endpoints if "READ_WRITE" in str(getattr(e, "endpoint_type", ""))),
+        endpoints[0].name,
+    )
+    ep = w.postgres.get_endpoint(name=ep_name)
+    cred = w.postgres.generate_database_credential(endpoint=ep_name)
 
     user = w.current_user.me().user_name
     host = ep.status.hosts.host

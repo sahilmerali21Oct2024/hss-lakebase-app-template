@@ -47,9 +47,9 @@ jobs:
     env:
       TARGET: ${{"{{"}} github.event.inputs.target || 'dev' {{"}}"}}
       APP_NAME: {{.app_name}}
-      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_PROJECT: {{.use_case_group}}
       LAKEBASE_DATABASE: {{.database_name}}
-      LAKEBASE_BRANCH: main
+      LAKEBASE_BRANCH: production
       DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
       DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
       DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
@@ -70,15 +70,15 @@ jobs:
       - name: Validate bundle
         run: databricks bundle validate -t $TARGET
 
-      {{if eq .use_lakebase "yes"}}- name: Run database migrations (alembic upgrade head)
+      - name: Run database migrations (alembic upgrade head)
         run: |
-          echo "Migrating Lakebase branch=$LAKEBASE_BRANCH database=$LAKEBASE_DATABASE"
+          echo "Migrating Lakebase project=$LAKEBASE_PROJECT branch=$LAKEBASE_BRANCH db=$LAKEBASE_DATABASE"
           alembic upgrade head
         # Failure here aborts the deploy — the app is NOT restarted on an
         # uncommitted schema change. Roll back with scripts/rollback_migration.py.
 
       - name: Show current schema revision
-        run: alembic current{{end}}
+        run: alembic current
 
       - name: Deploy bundle
         run: databricks bundle deploy -t $TARGET

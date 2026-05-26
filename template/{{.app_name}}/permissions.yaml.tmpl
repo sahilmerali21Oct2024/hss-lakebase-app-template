@@ -1,20 +1,37 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # permissions.yaml — declarative permission spec for this app.
 #
-# The post-deploy `grants` GitHub Actions job reads this file, looks up the
-# app's service principal client_id, and runs the GRANT statements automatically.
-# You no longer need to ask an admin to add Lakebase roles or UC permissions.
+# Three layers, three sections (mirrors docs/ARCHITECTURE.md 3-layer matrix):
 #
-# Add/remove schemas as your app evolves. The grants job is idempotent.
+#   lakebase     — the app SP's Postgres grants on this app's database
+#   unity_catalog — the app SP's UC grants (for background reads/writes)
+#   groups       — Databricks AD groups that need direct DB access via the
+#                  Data API or psql (operators, analysts, etc.)
+#
+# scripts/apply_grants.py applies `lakebase` + `unity_catalog`.
+# scripts/apply_group_grants.py applies `groups`.
+# Both are run by .github/workflows/deploy.yml. Idempotent.
 # ─────────────────────────────────────────────────────────────────────────────
 
 lakebase:
+  # The app SP is registered as a Postgres OAuth role via the databricks_auth
+  # extension (`databricks_create_role(<sp>, 'SERVICE_PRINCIPAL')`), then
+  # granted the privileges below.
   database: "{{.database_name}}"
   schemas:
     - name: public
       grants: [USAGE, CREATE]
       table_grants: [SELECT, INSERT, UPDATE, DELETE]
       sequence_grants: [USAGE, SELECT, UPDATE]
+
+  # Uncomment if this app reads from the shared reference database in the
+  # same use-case-group project (set needs_shared_reference_data=yes at init).
+  # shared_reference:
+  #   database: "shared_reference_db"
+  #   schemas:
+  #     - name: public
+  #       grants: [USAGE]
+  #       table_grants: [SELECT]
 
 unity_catalog:
   # `catalog` is resolved per-target from databricks.yml `var.catalog`.
@@ -34,5 +51,38 @@ unity_catalog:
   #   grants: [READ_VOLUME]
 
   warehouses: []
-  # - id: ${var.warehouse_id}
+  # - id: <warehouse-id>
   #   grants: [CAN_USE]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Databricks AD/account groups that need direct Lakebase access (Data API,
+# psql, or for analyst use). For each group listed, apply_group_grants.py:
+#   1) Calls `databricks_create_role('<group>', 'GROUP')` on the database
+#   2) Issues the GRANTs below
+#   3) Updates Lakebase project ACL to give the group CAN_USE on the project
+#      (separate from Postgres GRANTs — both layers required)
+#
+# Group names MUST match the Databricks account group display name exactly
+# (case-sensitive). The group must be assigned to the same workspace as the
+# Lakebase project.
+# ─────────────────────────────────────────────────────────────────────────────
+groups: []
+# Convention: each use-case-group has 3 standard groups. Uncomment to enable.
+# - name: hss-{{.use_case_group}}-admins
+#   project_permission: CAN_MANAGE
+#   schemas:
+#     - name: public
+#       grants: [USAGE, CREATE]
+#       table_grants: [SELECT, INSERT, UPDATE, DELETE, TRUNCATE]
+# - name: hss-{{.use_case_group}}-writers
+#   project_permission: CAN_USE
+#   schemas:
+#     - name: public
+#       grants: [USAGE]
+#       table_grants: [SELECT, INSERT, UPDATE, DELETE]
+# - name: hss-{{.use_case_group}}-readers
+#   project_permission: CAN_USE
+#   schemas:
+#     - name: public
+#       grants: [USAGE]
+#       table_grants: [SELECT]

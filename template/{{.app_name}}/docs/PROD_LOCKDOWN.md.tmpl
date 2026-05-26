@@ -49,7 +49,7 @@ done
 ### Lakebase
 
 ```sh
-INSTANCE={{.lakebase_instance_name}}
+INSTANCE={{.use_case_group}}
 
 # Owner = CI SP. Humans get CAN_USE at most.
 databricks postgres update-instance "$INSTANCE" \
@@ -131,7 +131,7 @@ databricks apps list --output json | \
   done
 
 # Should show owner = CI SP:
-databricks postgres get-instance {{.lakebase_instance_name}} | jq .owner
+databricks postgres get-instance {{.use_case_group}} | jq .owner
 ```
 
 ---

@@ -4,33 +4,65 @@ from fastapi import APIRouter
 from server.auth.config import APP_NAME, IS_DEPLOYED
 import os
 
-router = APIRouter()
+from server.db.lakebase import db
 
-{{if eq .use_lakebase "yes"}}from server.db.lakebase import db{{end}}
+router = APIRouter()
 
 
 @router.get("/api/health")
 async def health():
     result = {"status": "ok", "app": APP_NAME, "deployed": IS_DEPLOYED}
-    {{if eq .use_lakebase "yes"}}pool = await db.get_pool()
-    result["lakebase"] = "connected" if pool else "demo_mode"{{end}}
+    pool = await db.get_pool()
+    result["lakebase"] = "connected" if pool else "demo_mode"
     return result
 
 
 @router.get("/api/env")
 async def env_check():
-    check = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER",
-             "DATABRICKS_HOST", "DATABRICKS_APP_NAME", "APP_NAME"]
+    check = [
+        "LAKEBASE_PROJECT",
+        "LAKEBASE_BRANCH",
+        "LAKEBASE_DATABASE",
+        "LAKEBASE_USE_CASE_GROUP",
+        "DATABRICKS_HOST",
+        "DATABRICKS_APP_NAME",
+        "APP_NAME",
+        "EXPECTED_GIT_SHA",
+    ]
     return {v: "SET" if os.environ.get(v) else "MISSING" for v in check}
 
 
-{{if eq .use_lakebase "yes"}}@router.get("/api/lakebase/test")
+@router.get("/api/lakebase/test")
 async def lakebase_test():
     pool = await db.get_pool()
     if not pool:
         return {"status": "demo_mode"}
     try:
         async with pool.acquire() as conn:
-            return {"status": "connected", "test": await conn.fetchval("SELECT 1")}
+            return {
+                "status": "connected",
+                "project": os.environ.get("LAKEBASE_PROJECT"),
+                "branch": os.environ.get("LAKEBASE_BRANCH"),
+                "database": os.environ.get("LAKEBASE_DATABASE"),
+                "test": await conn.fetchval("SELECT 1"),
+            }
     except Exception as e:
-        return {"status": "error", "error": str(e)}{{end}}
+        return {"status": "error", "error": str(e)}
+{{if eq .expose_data_api "yes"}}
+
+@router.get("/api/data-api/info")
+async def data_api_info():
+    """Stub showing where the Data API URL would live for this app.
+
+    After scripts/enable_data_api.py runs, the URL is visible in the Lakebase
+    UI under your project's Data API tab. Apps can either:
+      (a) call it server-side via their app SP, or
+      (b) hand the URL to the browser with the user's OBO token attached.
+    """
+    return {
+        "data_api_enabled": True,
+        "project": os.environ.get("LAKEBASE_PROJECT"),
+        "branch": os.environ.get("LAKEBASE_BRANCH"),
+        "note": "See Lakebase project UI -> Data API for the actual URL.",
+    }
+{{end}}

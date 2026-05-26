@@ -107,7 +107,7 @@ After rollback, open a postmortem PR. Do not patch prod-only.
 
 ```bash
 python scripts/lakebase_branch.py ensure \
-  --instance {{.lakebase_instance_name}} \
+  --instance {{.use_case_group}} \
   --branch rollback-$(date +%F) \
   --parent main \
   --idle-timeout-min 30
@@ -158,7 +158,7 @@ opened. Manual cleanup:
 
 ```bash
 python scripts/lakebase_branch.py delete \
-  --instance {{.lakebase_instance_name}} \
+  --instance {{.use_case_group}} \
   --branch pr-123
 ```
 
@@ -169,7 +169,7 @@ python scripts/lakebase_branch.py delete \
 Likely causes, in order:
 
 1. A PR branch escaped — list with `databricks postgres list-branches
-   --project {{.lakebase_instance_name}}` and delete stragglers.
+   --project {{.use_case_group}}` and delete stragglers.
 2. Snapshot branches were never cleaned up — same fix.
 3. An app is holding connections open (no idle timeout firing). Check the
    pool sizing in `server/db/lakebase.py` (default `max_size=10`).

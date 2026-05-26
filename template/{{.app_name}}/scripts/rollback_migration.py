@@ -1,21 +1,38 @@
-"""Roll a Lakebase database back to a known-good revision.
+"""Roll a Lakebase schema change back to a known-good state.
 
-Two strategies:
+Two supported strategies — both keep the canonical `production` branch as the
+source of truth. We deliberately do NOT support "swap the app onto a snapshot
+branch" — per HSS architecture guidance, branches are for validation only,
+never as a promotion or rollback mechanism. The production branch must always
+be the live, canonical branch for the env.
 
-1. `--strategy alembic` (default): runs `alembic downgrade <rev>`. Use when
-   the broken migration has a real downgrade() (the validator enforces this).
+Strategies:
 
-2. `--strategy branch-swap`: ASSUMES you took a Lakebase branch before
-   deploying. Repoints the app's resource binding to that branch. The
-   broken branch is preserved for forensics; delete it manually once safe.
+1. `--strategy alembic` (default, preferred):
+       Run `alembic downgrade <revision>`. Use this whenever the broken
+       migration has a real downgrade() (the pre-deploy validator enforces
+       that every revision has one).
+
+2. `--strategy pitr`:
+       Perform a Lakebase point-in-time restore of the production branch.
+       Use this when downgrade() can't safely undo a data-destructive change
+       (e.g. a DROP COLUMN that lost data). This rewinds the production
+       branch's storage to a timestamp before the bad migration ran.
+
+       This is a destructive operation: any data written AFTER the timestamp
+       is lost. Coordinate with stakeholders, then run:
+
+           python scripts/rollback_migration.py --strategy pitr \\
+               --timestamp 2026-05-20T14:30:00Z
 
 Example
 -------
-    # Just undo the last migration
+    # Standard case: undo the last migration
     python scripts/rollback_migration.py --strategy alembic --revision -1
 
-    # Or repoint the app to the pre-deploy snapshot branch
-    python scripts/rollback_migration.py --strategy branch-swap --branch rollback-2026-05-20
+    # Emergency case: rewind production to 14:30 UTC today
+    python scripts/rollback_migration.py --strategy pitr \\
+        --timestamp 2026-05-20T14:30:00Z
 """
 
 from __future__ import annotations
@@ -29,59 +46,75 @@ from databricks.sdk import WorkspaceClient
 
 
 def alembic_rollback(revision: str) -> int:
-    print(f"Running alembic downgrade {revision}", flush=True)
+    print(f"[rollback] alembic downgrade {revision}", flush=True)
     return subprocess.call(["alembic", "downgrade", revision])
 
 
-def branch_swap(app_name: str, instance: str, database: str, branch: str) -> int:
-    """Rebind the app's Lakebase resource to a different branch.
+def pitr_rollback(project: str, branch: str, timestamp: str) -> int:
+    """Reset the branch's storage to a prior point in time.
 
-    Implemented by patching the deployed Apps resource. After this returns,
-    you still need to `databricks apps restart <app>` for the new env to apply.
+    Lakebase Autoscaling supports point-in-time recovery within the project's
+    retention window (default 7 days). This is the only correct rollback path
+    for data-destructive migrations.
     """
     w = WorkspaceClient()
-    app = w.apps.get(name=app_name)
-
-    new_resources = []
-    swapped = False
-    for r in app.resources or []:
-        if r.name == "lakebase_db" and r.database is not None:
-            r.database.database_name = database
-            r.database.instance_name = instance
-            # branch is encoded in the endpoint reference Apps resolves
-            r.description = f"Rolled back to branch={branch}"
-            swapped = True
-        new_resources.append(r)
-    if not swapped:
-        print("ERROR: app has no lakebase_db resource to swap.", file=sys.stderr)
-        return 2
-
-    w.apps.update(name=app_name, app=app)
-    w.apps.restart(name=app_name)
-    print(f"Rebound {app_name} to branch={branch}; app restarted.", flush=True)
-    return 0
+    branch_path = f"projects/{project}/branches/{branch}"
+    print(
+        f"[rollback] PITR: resetting {branch_path} to {timestamp}. "
+        f"This will rewind storage — data written after this timestamp will be lost.",
+        flush=True,
+    )
+    # The exact SDK call here depends on the databricks-sdk version. The CLI
+    # equivalent is:
+    #   databricks postgres reset-branch <branch_path> \
+    #     --json '{"source_timestamp": "<ts>"}'
+    # which is what the deploy workflow falls back to for portability.
+    try:
+        op = w.postgres.reset_branch(
+            name=branch_path,
+            source_timestamp=timestamp,
+        )
+        result = op.wait() if hasattr(op, "wait") else op
+        print(f"[rollback] PITR complete: {result}", flush=True)
+        return 0
+    except AttributeError:
+        # Older SDKs: shell out to the CLI.
+        cmd = [
+            "databricks",
+            "postgres",
+            "reset-branch",
+            branch_path,
+            "--json",
+            f'{{"source_timestamp": "{timestamp}"}}',
+        ]
+        print(f"[rollback] SDK lacks reset_branch; falling back to CLI: {' '.join(cmd)}", flush=True)
+        return subprocess.call(cmd)
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--strategy", choices=["alembic", "branch-swap"], default="alembic")
-    p.add_argument("--revision", default="-1", help="alembic revision spec")
-    p.add_argument("--branch", help="branch name for branch-swap strategy")
     p.add_argument(
-        "--app-name", default=os.environ.get("APP_NAME"), help="Databricks app name"
+        "--strategy",
+        choices=["alembic", "pitr"],
+        default="alembic",
+        help="alembic = run downgrade() (preferred); pitr = rewind storage to a timestamp",
     )
-    p.add_argument("--instance", default=os.environ.get("LAKEBASE_INSTANCE"))
-    p.add_argument("--database", default=os.environ.get("LAKEBASE_DATABASE"))
+    p.add_argument("--revision", default="-1", help="alembic revision spec")
+    p.add_argument("--timestamp", help="ISO8601 timestamp for PITR (e.g. 2026-05-20T14:30:00Z)")
+    p.add_argument("--project", default=os.environ.get("LAKEBASE_PROJECT"))
+    p.add_argument("--branch", default=os.environ.get("LAKEBASE_BRANCH", "production"))
     args = p.parse_args()
 
     if args.strategy == "alembic":
         return alembic_rollback(args.revision)
 
-    for required in ("app_name", "instance", "database", "branch"):
-        if not getattr(args, required):
-            print(f"--{required.replace('_', '-')} is required for branch-swap")
-            return 2
-    return branch_swap(args.app_name, args.instance, args.database, args.branch)
+    if not args.project:
+        print("--project is required for PITR (or set LAKEBASE_PROJECT env var)", file=sys.stderr)
+        return 2
+    if not args.timestamp:
+        print("--timestamp is required for PITR", file=sys.stderr)
+        return 2
+    return pitr_rollback(args.project, args.branch, args.timestamp)
 
 
 if __name__ == "__main__":

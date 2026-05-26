@@ -30,7 +30,7 @@ If you disagree with anything here, change this file first, not the apps.
 | Shared tables across apps? | **Reference data only.** Put it in `shared_ref` DB, owned by the platform team, read-only to apps. | Juliana: "you can't have a shared table because the indexes are going to be different on each application." Indexes are per-DB so each app keeps its own. |
 | Synced tables (UC → Lakebase) | **The consuming app owns the sync.** If two apps want the same UC table, each gets its own synced copy in its own DB. | Avoids index/permission collisions. Cost of duplicate sync is small vs. the operational pain of sharing. |
 
-The instance name is a bundle variable (`var.lakebase_instance`,
+The instance name is a bundle variable (`var.lakebase_project`,
 default `hss-shared-lakebase`). The database name is per-app
 (`var.lakebase_database`, default `{{.app_name}}_db`).
 

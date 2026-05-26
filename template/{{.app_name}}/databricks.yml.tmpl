@@ -4,40 +4,59 @@ bundle:
 # ─────────────────────────────────────────────────────────────────────────────
 # Variables: every environment-specific value lives here. NEVER hardcode these
 # inside Python or app.yaml — the pre-deploy validator will block the PR.
+#
+# Topology (Lakebase Autoscaling):
+#   workspace (dev/test/prod)
+#     └── project = use-case-group  (e.g., {{.use_case_group}})
+#          └── branch = production  (the canonical branch for this env)
+#                ├── database = {{.database_name}}    (this app)
+#                ├── database = <other_app_db>        (sibling app in same group)
+#                └── database = shared_reference_db   (optional, group-wide)
+#
+# PR-ephemeral isolation = child branch off production (still inside the
+# same project), TTL'd by the branch-per-pr workflow. NOT a separate project.
 # ─────────────────────────────────────────────────────────────────────────────
 variables:
   catalog:
-    description: "Unity Catalog for this environment."
-  lakebase_instance:
-    description: "Shared Lakebase database instance name."
-    default: {{.lakebase_instance_name}}
-  lakebase_database:
-    description: "Logical Lakebase database name for this app."
-    default: {{.database_name}}
+    description: "Unity Catalog for this environment (for UC reads, NOT Lakebase)."
+  lakebase_project:
+    description: "Lakebase Autoscaling project = use-case-group. Same project ID exists in every workspace (dev/test/prod)."
+    default: {{.use_case_group}}
   lakebase_branch:
-    description: "Lakebase branch to bind. 'main' for dev/prod; PR workflow overrides per-PR."
-    default: main
+    description: "Lakebase branch on the project. 'production' is the canonical branch in this env; the branch-per-pr workflow overrides this per-PR."
+    default: production
+  lakebase_database:
+    description: "Lakebase database name for this app within the project's branch. One DB per app."
+    default: {{.database_name}}
   audit_catalog:
-    description: "UC catalog holding the shared audit.app_events table."
+    description: "UC catalog holding the shared audit.app_events table (cross-app, cross-group)."
     default: {{.audit_catalog}}
+{{if eq .needs_shared_reference_data "yes"}}  shared_reference_database:
+    description: "Read-only Lakebase database holding synced UC tables shared by all apps in this use-case group."
+    default: shared_reference_db{{end}}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared resource definitions. The app is rebound per target so dev/prod each
-# get their own DB binding without code changes.
+# Resources.
+#
+# IMPORTANT — Lakebase Autoscaling resource binding via bundles is currently
+# brittle (requires internal database UIDs, terraform-provider-databricks
+# crashes on missing optional fields). The proven pattern is:
+#
+#   1) Declare project/branch/database as variables here (above).
+#   2) Pass them to the app via app.yaml as plain env vars.
+#   3) The app connects at runtime via the SDK (server/db/lakebase.py),
+#      which fetches the endpoint, generates an OAuth credential, and pools.
+#
+# This avoids bundle-side failures, matches the proven pattern used by the
+# field-tested lakebase-sync-demo app, and keeps the per-app SP role provisioning
+# explicit (scripts/apply_grants.py) instead of relying on auto-grant magic.
 # ─────────────────────────────────────────────────────────────────────────────
 resources:
   apps:
     {{.app_name}}:
       name: {{.app_name}}
-      description: "{{.app_name}} — generated from hss-lakebase-app-template."
+      description: "{{.app_name}} — generated from hss-lakebase-app-template. Use-case group: {{.use_case_group}}."
       source_code_path: .
-      {{if eq .use_lakebase "yes"}}resources:
-        - name: lakebase_db
-          description: "Lakebase database binding — injects PGHOST/PGPORT/PGDATABASE/PGUSER."
-          database:
-            database_name: ${var.lakebase_database}
-            instance_name: ${var.lakebase_instance}
-            permission: CAN_CONNECT_AND_CREATE{{end}}
 
 targets:
   dev:
@@ -47,7 +66,19 @@ targets:
       host: {{.dev_workspace_url}}
     variables:
       catalog: {{.dev_catalog}}
-      lakebase_branch: main
+      lakebase_branch: production
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # OPTIONAL: enable when HSS provisions a `test` workspace. Until then,
+  # PR validation runs against ephemeral child branches inside dev's project.
+  # ─────────────────────────────────────────────────────────────────────────
+  # test:
+  #   mode: production
+  #   workspace:
+  #     host: <test_workspace_url>
+  #   variables:
+  #     catalog: <test_catalog>
+  #     lakebase_branch: production
 
   prod:
     mode: production
@@ -55,15 +86,4 @@ targets:
       host: {{.prod_workspace_url}}
     variables:
       catalog: {{.prod_catalog}}
-      lakebase_branch: main
-{{if eq .use_lakebase "yes"}}    resources:
-      apps:
-        {{.app_name}}:
-          # In prod, restrict to CAN_CONNECT — schema changes happen via the
-          # migration job, not the app SP.
-          resources:
-            - name: lakebase_db
-              database:
-                database_name: ${var.lakebase_database}
-                instance_name: ${var.lakebase_instance}
-                permission: CAN_CONNECT{{end}}
+      lakebase_branch: production

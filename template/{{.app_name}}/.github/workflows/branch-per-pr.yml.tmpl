@@ -28,10 +28,10 @@ jobs:
     environment: dev
     env:
       APP_NAME: {{.app_name}}
-      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_PROJECT: {{.use_case_group}}
       LAKEBASE_DATABASE: {{.database_name}}
       LAKEBASE_BRANCH: pr-${{"{{"}} github.event.pull_request.number {{"}}"}}
-      PARENT_BRANCH: main
+      PARENT_BRANCH: production
       DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
       DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
       DATABRICKS_CLIENT_SECRET: ${{"{{"}} secrets.DATABRICKS_CLIENT_SECRET {{"}}"}}
@@ -47,30 +47,29 @@ jobs:
 
       - uses: databricks/setup-cli@main
 
-      - name: Create or update PR branch
+      - name: Create or update PR branch (child of production, 7d TTL)
         run: python scripts/lakebase_branch.py ensure
-            --instance "$LAKEBASE_INSTANCE"
+            --project "$LAKEBASE_PROJECT"
             --branch "$LAKEBASE_BRANCH"
             --parent "$PARENT_BRANCH"
+            --ttl-days 7
             --idle-timeout-min 30
 
       - name: Apply migrations against PR branch
         run: alembic upgrade head
 
-      - name: Comment PR with branch endpoint
+      - name: Comment PR with branch info
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = process.env.LAKEBASE_BRANCH;
-            const inst = process.env.LAKEBASE_INSTANCE;
             const body = [
               "Lakebase PR branch ready",
               "",
-              "- Instance: `" + inst + "`",
-              "- Branch:   `" + branch + "`",
+              "- Project: `" + process.env.LAKEBASE_PROJECT + "` (use-case-group)",
+              "- Branch:  `" + process.env.LAKEBASE_BRANCH + "` (forked from production)",
               "- Database: `" + process.env.LAKEBASE_DATABASE + "`",
               "",
-              "Migrations applied: see job log. Branch auto-deletes on PR close."
+              "Migrations applied: see job log. Branch auto-deletes on PR close + 7d TTL safety."
             ].join("\n");
             await github.rest.issues.createComment({
               issue_number: context.payload.pull_request.number,
@@ -84,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     env:
-      LAKEBASE_INSTANCE: {{.lakebase_instance_name}}
+      LAKEBASE_PROJECT: {{.use_case_group}}
       LAKEBASE_BRANCH: pr-${{"{{"}} github.event.pull_request.number {{"}}"}}
       DATABRICKS_HOST: ${{"{{"}} vars.DATABRICKS_HOST {{"}}"}}
       DATABRICKS_CLIENT_ID: ${{"{{"}} vars.DATABRICKS_CLIENT_ID {{"}}"}}
@@ -98,6 +97,6 @@ jobs:
       - uses: databricks/setup-cli@main
       - name: Delete PR branch
         run: python scripts/lakebase_branch.py delete
-            --instance "$LAKEBASE_INSTANCE"
+            --project "$LAKEBASE_PROJECT"
             --branch "$LAKEBASE_BRANCH"
 {{end}}

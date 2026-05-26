@@ -2,9 +2,10 @@
 # app.yaml — runtime config consumed by Databricks Apps.
 #
 # DO NOT put environment-specific values here. Anything that differs between
-# dev and prod belongs in databricks.yml under `variables` / `targets`.
+# dev and prod belongs in databricks.yml under `variables` / `targets`, and is
+# baked into this app.yaml at `databricks bundle deploy` time via ${var.*}.
 # The pre-deploy validator (.github/workflows/validate.yml) will block the PR
-# if it sees a hardcoded catalog name or credential token in this file.
+# if it sees a hardcoded catalog name, workspace URL, or credential token here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 command:
@@ -17,7 +18,9 @@ command:
   - "--port"
   - "8000"
 
-{{if eq .use_obo "yes"}}user_api_scopes:
+{{if eq .use_obo "yes"}}# Scopes requested when the platform mints the user's x-forwarded-access-token.
+# Keep this minimal — only request what the app actually uses.
+user_api_scopes:
   - sql
   - files.files
   - dashboards.genie{{end}}
@@ -29,16 +32,30 @@ env:
     value: "INFO"
   - name: AUDIT_LOG_SINK
     value: "stdout"   # the logs-sink pipeline tails /logz into Delta
-{{if eq .use_lakebase "yes"}}
-  # ── Lakebase: PG* vars are injected from the bound `lakebase_db` resource
-  # declared in databricks.yml. Never hardcode host/user/database here.
-  - name: PGHOST
-    valueFrom: lakebase_db
-  - name: PGPORT
-    valueFrom: lakebase_db
-  - name: PGUSER
-    valueFrom: lakebase_db
-  - name: PGDATABASE
-    valueFrom: lakebase_db
-  - name: PGAPPNAME
-    value: "{{.app_name}}"{{end}}
+
+  # ── Lakebase Autoscaling identity for this app ──────────────────────────────
+  # We do NOT use bundle `postgres:` resource binding because it's brittle
+  # (requires internal UIDs and the terraform provider crashes on omissions).
+  # Instead, the app reads these env vars and uses the SDK at runtime to:
+  #   1) Resolve the read-write endpoint of the branch
+  #   2) Generate an OAuth credential (auto-refreshed every 45 min)
+  #   3) Connect to Postgres
+  # See server/db/lakebase.py.
+  - name: LAKEBASE_USE_CASE_GROUP
+    value: "{{.use_case_group}}"
+  - name: LAKEBASE_PROJECT
+    value: "${var.lakebase_project}"
+  - name: LAKEBASE_BRANCH
+    value: "${var.lakebase_branch}"
+  - name: LAKEBASE_DATABASE
+    value: "${var.lakebase_database}"
+{{if eq .needs_shared_reference_data "yes"}}  - name: LAKEBASE_SHARED_REFERENCE_DATABASE
+    value: "${var.shared_reference_database}"{{end}}
+{{if eq .expose_data_api "yes"}}
+  # ── Data API (PostgREST) ────────────────────────────────────────────────────
+  # When enabled, the bootstrap script provisions the `authenticator` role and
+  # exposes the `public` schema. App code can either talk to Postgres directly
+  # (via server/db/lakebase.py) or proxy to the Data API for CRUD endpoints.
+  # See scripts/enable_data_api.py.
+  - name: LAKEBASE_DATA_API_ENABLED
+    value: "true"{{end}}
