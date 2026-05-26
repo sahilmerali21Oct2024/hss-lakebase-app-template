@@ -19,21 +19,15 @@ bundle:
 variables:
   catalog:
     description: "Unity Catalog for this environment (for UC reads, NOT Lakebase)."
-  lakebase_project:
-    description: "Lakebase Autoscaling project = use-case-group. Same project ID exists in every workspace (dev/test/prod)."
-    default: {{.use_case_group}}
-  lakebase_branch:
-    description: "Lakebase branch on the project. 'production' is the canonical branch in this env; the branch-per-pr workflow overrides this per-PR."
-    default: production
-  lakebase_database:
-    description: "Lakebase database name for this app within the project's branch. One DB per app."
-    default: {{.database_name}}
   audit_catalog:
     description: "UC catalog holding the shared audit.app_events table (cross-app, cross-group)."
     default: {{.audit_catalog}}
-{{if eq .needs_shared_reference_data "yes"}}  shared_reference_database:
-    description: "Read-only Lakebase database holding synced UC tables shared by all apps in this use-case group."
-    default: shared_reference_db{{end}}
+
+# Note: Lakebase project/branch/database values are NOT bundle variables —
+# they are baked into app.yaml at `bundle init` time (use-case-group is the
+# same in every env, so there's nothing to vary). The CI workflow exports
+# LAKEBASE_PROJECT/LAKEBASE_BRANCH/LAKEBASE_DATABASE as env vars for migrations
+# and grants scripts; values come from the wizard inputs and are not target-specific.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Resources.

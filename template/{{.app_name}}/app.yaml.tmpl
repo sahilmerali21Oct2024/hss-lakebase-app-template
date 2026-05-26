@@ -41,16 +41,23 @@ env:
   #   2) Generate an OAuth credential (auto-refreshed every 45 min)
   #   3) Connect to Postgres
   # See server/db/lakebase.py.
+  #
+  # Why these are hardcoded (not ${var.x} refs): Databricks Apps does NOT
+  # resolve `${var.*}` inside app.yaml — that interpolation only happens in
+  # databricks.yml. These values are known at `bundle init` time (use-case
+  # group + database name are wizard inputs; production branch is the
+  # convention), so we bake them in directly. The branch-per-pr workflow
+  # overrides LAKEBASE_BRANCH per-PR via `databricks apps update`.
   - name: LAKEBASE_USE_CASE_GROUP
     value: "{{.use_case_group}}"
   - name: LAKEBASE_PROJECT
-    value: "${var.lakebase_project}"
+    value: "{{.use_case_group}}"
   - name: LAKEBASE_BRANCH
-    value: "${var.lakebase_branch}"
+    value: "production"
   - name: LAKEBASE_DATABASE
-    value: "${var.lakebase_database}"
+    value: "{{.database_name}}"
 {{if eq .needs_shared_reference_data "yes"}}  - name: LAKEBASE_SHARED_REFERENCE_DATABASE
-    value: "${var.shared_reference_database}"{{end}}
+    value: "shared_reference_db"{{end}}
 {{if eq .expose_data_api "yes"}}
   # ── Data API (PostgREST) ────────────────────────────────────────────────────
   # When enabled, the bootstrap script provisions the `authenticator` role and
