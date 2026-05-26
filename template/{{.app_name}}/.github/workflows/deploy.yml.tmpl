@@ -83,9 +83,15 @@ jobs:
       - name: Deploy bundle
         run: databricks bundle deploy -t $TARGET
 
-      - name: Apply permissions.yaml grants
+      - name: Apply app SP grants (Lakebase + UC)
         run: python scripts/apply_grants.py --app-name "$APP_NAME"
 
+      - name: Apply group grants (if any declared in permissions.yaml)
+        run: python scripts/apply_group_grants.py
+{{if eq .expose_data_api "yes"}}
+      - name: Enable Lakebase Data API for this project
+        run: python scripts/enable_data_api.py
+{{end}}
       - name: Inject EXPECTED_GIT_SHA into the app
         # Patches the deployed app's env so the in-process self-check can refuse
         # to start if someone later does a manual redeploy from a different SHA.
@@ -94,18 +100,17 @@ jobs:
           import os, json, subprocess
           sha = os.environ["GITHUB_SHA"]
           app = os.environ["APP_NAME"]
+          env_list = [
+              {"name": "EXPECTED_GIT_SHA", "value": sha},
+              {"name": "DEPLOY_TIMESTAMP", "value": os.environ.get("GITHUB_RUN_ID", "")},
+          ]
+          data_api_url = os.environ.get("LAKEBASE_DATA_API_URL")
+          if data_api_url:
+              env_list.append({"name": "LAKEBASE_DATA_API_URL", "value": data_api_url})
           subprocess.run(
               ["databricks", "apps", "update", app,
                "--update-mask", "config.env",
-               "--json", json.dumps({
-                   "config": {
-                       "env": [
-                           {"name": "EXPECTED_GIT_SHA", "value": sha},
-                           {"name": "DEPLOY_TIMESTAMP",
-                            "value": os.environ.get("GITHUB_RUN_ID", "")},
-                       ]
-                   }
-               })],
+               "--json", json.dumps({"config": {"env": env_list}})],
               check=True,
           )
           PY
