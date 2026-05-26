@@ -60,7 +60,6 @@ targets:
       host: {{.dev_workspace_url}}
     variables:
       catalog: {{.dev_catalog}}
-      lakebase_branch: production
 
   # ─────────────────────────────────────────────────────────────────────────
   # OPTIONAL: enable when HSS provisions a `test` workspace. Until then,
@@ -72,7 +71,6 @@ targets:
   #     host: <test_workspace_url>
   #   variables:
   #     catalog: <test_catalog>
-  #     lakebase_branch: production
 
   prod:
     mode: production
@@ -80,4 +78,3 @@ targets:
       host: {{.prod_workspace_url}}
     variables:
       catalog: {{.prod_catalog}}
-      lakebase_branch: production
