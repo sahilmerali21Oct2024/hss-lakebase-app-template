@@ -14,7 +14,41 @@ policies. UC does. Therefore:
    - User preferences, saved views, drafts.
    - Workflow state (which user approved which item, when).
    - Derived / aggregated results that are already de-identified.
-   - Reference data (code lists, lookup tables) — in `shared_ref` DB.
+   - Reference data (code lists, lookup tables) — in the use-case-group
+     project's `shared_reference_db` if other apps in the group also need it.
+
+### The shared reference database pattern
+
+Within a use-case-group Lakebase project, you can optionally provision a
+shared database called `shared_reference_db`. It exists alongside each app's
+own database on the `production` branch and is used for **synced UC tables
+or reference data that multiple apps in the group need to read with their
+own per-app indexes**.
+
+```
+projects/clinical-informatics/branches/production/
+    ├── databases/claims_triage_db        ← app A writes here
+    ├── databases/care_gaps_db            ← app B writes here
+    └── databases/shared_reference_db     ← READ-ONLY for both A and B
+        ├── public.patient_master         (synced from UC)
+        ├── public.icd10_codes            (synced from UC)
+        └── ...
+```
+
+Rules for `shared_reference_db`:
+
+- **All apps in the group get SELECT-only by default.** Write access is
+  reserved for the sync pipeline / platform team.
+- **PHI is still subject to Rule 1.** A patient master that contains PHI
+  must live in UC and be read via OBO — do *not* sync it into
+  `shared_reference_db` unless the synced copy is the already-filtered
+  view, with the data steward's sign-off.
+- **Per-app indexes are still per-app.** Each app declares the indexes it
+  needs in `shared_reference_db` via its own migrations. Indexes don't
+  affect data classification; they are local optimizations.
+- **To opt this app in**, set `needs_shared_reference_data=yes` at
+  scaffold time, then uncomment the `shared_reference:` block in
+  `permissions.yaml`.
 
 3. **If you must cache sensitive data in Lakebase**, you take on ownership
    of the controls UC would have given you. That means:

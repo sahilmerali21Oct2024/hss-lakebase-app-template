@@ -49,18 +49,25 @@ done
 ### Lakebase
 
 ```sh
-INSTANCE={{.use_case_group}}
+# This app's use-case-group project. Repeat for every project in the workspace.
+PROJECT={{.use_case_group}}
 
-# Owner = CI SP. Humans get CAN_USE at most.
-databricks postgres update-instance "$INSTANCE" \
-  --owner-service-principal-id "$CI_SP"
-
-databricks permissions set lakebase-instance "$INSTANCE" \
+# Set CI SP as CAN_MANAGE on the project. Humans get CAN_USE at most;
+# never CAN_MANAGE on a prod project.
+databricks postgres update-project-permissions "projects/$PROJECT" \
   --json "{
     \"access_control_list\": [
       {\"service_principal_name\": \"$CI_SP\", \"permission_level\": \"CAN_MANAGE\"}
     ]
   }"
+
+# Lock the production branch — no_expiry was set at bootstrap time; verify:
+databricks postgres get-branch "projects/$PROJECT/branches/production" \
+  | jq '.spec.no_expiry'   # must be true
+
+# Forbid humans from creating projects/branches directly. Workspace setting:
+#   Settings > Identity and access > Lakebase entitlements
+# Only the CI SP group should have "Can create Lakebase projects".
 ```
 
 ### Workspace files
@@ -130,8 +137,13 @@ databricks apps list --output json | \
       --output json | jq '.access_control_list'
   done
 
-# Should show owner = CI SP:
-databricks postgres get-instance {{.use_case_group}} | jq .owner
+# Should show CI SP as the only CAN_MANAGE principal:
+databricks postgres get-project-permissions "projects/{{.use_case_group}}" \
+  | jq '.access_control_list[] | select(.permission_level == "CAN_MANAGE")'
+
+# Should show no_expiry = true on production:
+databricks postgres get-branch "projects/{{.use_case_group}}/branches/production" \
+  | jq '.spec.no_expiry'
 ```
 
 ---

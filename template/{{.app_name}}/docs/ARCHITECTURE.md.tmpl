@@ -1,201 +1,165 @@
-# Architecture — Apps on Lakebase
+# Architecture — {{.app_name}}
 
-This document answers the questions that came up in the May 20, 2026
-architecture session. It is the single source of truth for **how apps share
-Lakebase**, **how schema changes are promoted**, and **what is governed where**.
+This document describes the topology and operational model for HSS Databricks
+apps generated from `hss-lakebase-app-template`. It is the source of truth
+that the wizard prompts, `databricks.yml`, `app.yaml`, the scripts, and the
+GitHub Actions workflows all align to.
 
-If you disagree with anything here, change this file first, not the apps.
-
----
-
-## 1. Topology: one instance, many databases, one DB per app
+## 1. Topology — one project per use-case group
 
 ```
-                 Lakebase instance: hss-shared-lakebase
-                 ┌──────────────────────────────────────┐
-                 │  database: app_a_db   <- App A only  │
-                 │  database: app_b_db   <- App B only  │
-                 │  database: app_c_db   <- App C only  │
-                 │  database: shared_ref <- read-only   │
-                 │                        cross-app     │
-                 └──────────────────────────────────────┘
+Databricks Account
+│
+├── workspace: dev   (https://...-dev.cloud.databricks.com)
+│   └── Lakebase Autoscaling projects   ← one PROJECT per use-case group
+│       ├── clinical-informatics
+│       │   └── branch: production    (no_expiry=True)
+│       │       ├── database: claims_triage_db
+│       │       ├── database: care_gaps_db
+│       │       ├── database: ...                  (5–10 apps total)
+│       │       └── database: shared_reference_db  (optional, group-wide)
+│       ├── rev-cycle-analytics
+│       │   └── branch: production
+│       │       └── ... 5–10 databases ...
+│       └── dicom-imaging
+│           └── ... same pattern ...
+│
+├── workspace: test  (same 3 projects, mirrored)
+└── workspace: prod  (same 3 projects, mirrored)
 ```
 
-**Decisions**
+Why this shape:
 
-| Question | Decision | Why |
-|---|---|---|
-| Project per app? | **No.** One shared instance per workspace. | Apps are used <5% of the time; an instance per app wastes idle compute and operational overhead. |
-| Database per app? | **Yes.** One logical DB per app. | Schema isolation, per-app roles, no cross-app blast radius on migrations. |
-| Shared tables across apps? | **Reference data only.** Put it in `shared_ref` DB, owned by the platform team, read-only to apps. | Juliana: "you can't have a shared table because the indexes are going to be different on each application." Indexes are per-DB so each app keeps its own. |
-| Synced tables (UC → Lakebase) | **The consuming app owns the sync.** If two apps want the same UC table, each gets its own synced copy in its own DB. | Avoids index/permission collisions. Cost of duplicate sync is small vs. the operational pain of sharing. |
+- **Project = use-case group.** Apps that share data and ownership share a
+  project. Apps that are independent get separate projects. Project
+  boundaries are also the unit of Lakebase ACL — `hss-clinical-informatics-*`
+  groups get access to the `clinical-informatics` project but not to
+  `rev-cycle-analytics`.
+- **Database per app, all on `production` branch.** Each app owns its own
+  schema and indexes (per Juliana: "I can't have a shared table because the
+  indexes are going to be different on each application"), but shares the
+  serverless compute pool of its sibling apps. This is cheaper than
+  one-project-per-app because per-app projects each carry their own minimum
+  compute floor.
+- **`production` branch is canonical.** It is created `no_expiry=True` and
+  is never deleted. Schema migrations land here. The app SP connects to
+  this branch in steady state.
+- **PR branches fork off `production`** with a 7-day TTL and 30-minute idle
+  timeout. They are for validating schema migrations *only*. They are not
+  used for promotion or rollback.
+- **Workspaces are the env boundary.** dev/test/prod each carry the same
+  set of project IDs (`clinical-informatics`, etc.) — no `-dev` / `-prod`
+  suffixes. Promotion = redeploy the app code to the next workspace; the
+  project name stays the same. Cross-workspace data flows (e.g. UC sync)
+  happen via separate sync pipelines, never by pointing a dev app at a
+  prod project.
 
-The instance name is a bundle variable (`var.lakebase_project`,
-default `hss-shared-lakebase`). The database name is per-app
-(`var.lakebase_database`, default `{{.app_name}}_db`).
+This app, `{{.app_name}}`, belongs to use-case group **`{{.use_case_group}}`**
+and writes to database **`{{.database_name}}`**.
 
----
+## 2. Three layers of access control
 
-## 2. Environments and branching
+| Layer | Identities | Provisioned by | Enforces |
+|---|---|---|---|
+| **Lakebase project ACL** | App SP, AD groups | `apply_group_grants.py` (groups) + manual for app SP | who can reach the project at all |
+| **Postgres role grants** | App SP, AD groups, individual users (via Data API) | `apply_grants.py`, `apply_group_grants.py`, `databricks_create_role()` | per-schema / per-table CRUD privileges |
+| **Row-level security** | per-user / per-tenant | RLS policies in your migrations (`CREATE POLICY ...`) | per-row visibility based on `current_user` |
 
-Each workspace is its own Lakebase project:
+All three layers stack — a group needs **(a)** project ACL CAN_USE, **(b)**
+a Postgres role plus GRANTs, and **(c)** RLS policies that match its
+identity (if RLS is enabled on the table). This is intentional defense in
+depth: a misconfiguration at any one layer fails closed.
 
-```
-padella-test workspace   ──>   project "hss-shared-lakebase" (dev/test)
-                                  branch: main          (default)
-                                  branch: pr-123        (per-PR, ephemeral)
-                                  branch: pr-124        (per-PR, ephemeral)
-
-padella-prod workspace   ──>   project "hss-shared-lakebase" (prod)
-                                  branch: main                (default)
-                                  branch: rollback-2026-05-20 (snapshot)
-```
-
-**Why per-workspace projects (not one global project)?** Lakebase projects
-are workspace-scoped today. You **cannot** sync a UC table in dev to a
-Lakebase branch in prod, or vice versa. The "branch in prod, test from dev"
-workflow is not supported. If you need to test against a prod-shaped DB,
-take a branch *inside the prod workspace* (`pr-` or `rollback-`) and run
-your test traffic through a dev-mode App in that same prod workspace.
-
-**PR branch lifecycle:**
-
-| Event | Action |
-|---|---|
-| PR opened/updated | `branch-per-pr.yml` creates `pr-<N>` from `main`, runs `alembic upgrade head` against it. |
-| Idle for 30 min | Endpoint scales to zero compute automatically. |
-| PR closed/merged | Branch is deleted. |
-
-**Cost guardrails:**
-
-- A branch costs *storage diff from parent* + *compute when connected*.
-- We enforce a 30-minute idle timeout on PR endpoints in
-  `scripts/lakebase_branch.py`.
-- Confirm pricing with your AE before turning on `branch-per-pr` org-wide.
-
----
-
-## 3. Schema change & rollback workflow
-
-This is the single most important process to follow. The template enforces
-it via CI, but you still need to understand it.
+## 3. Identity model
 
 ```
-   Developer                  PR CI                       Deploy CI (main)
-   ─────────                  ─────                       ────────────────
-1. alembic revision -m "..."
-2. edit upgrade() AND
-   downgrade()
-3. git push
-4. open PR     ──────────►   branch-per-pr.yml
-                              creates pr-N branch
-                              runs alembic upgrade head
-                              app boots against pr-N
-                              ── validator blocks PRs whose
-                                 downgrade() is just `pass` ──
-5. review, merge ─────────────────────────────────────►  deploy.yml
-                                                          alembic upgrade head
-                                                          against prod main
-                                                          bundle deploy
-                                                          apply grants
-                                                          restart app
-                                                          smoke test
+Browser ── HTTPS ──┬── App (FastAPI) ──┬── Lakebase (Postgres)
+                   │                   │   ├── as App SP for app's own writes
+                   │                   │   └── as user (impersonated) for OBO reads
+                   │                   │
+                   │                   └── Unity Catalog
+                   │                       ├── as App SP for background reads
+                   │                       └── as user (OBO) for governed reads
+                   │
+                   └── (optional) Data API ── Lakebase as authenticated user
 ```
 
-**Rollback options (pick one — both are scripted):**
+- **App SP** (auto-provisioned at first `apps create`). Used for:
+  - App's own writes to its Lakebase database (`server/db/lakebase.py`)
+  - Background reads from Unity Catalog
+  - Migration runs in CI (impersonated by the CI principal)
+- **On-Behalf-Of (OBO) user token** (`x-forwarded-access-token` header).
+  Used for UC reads where the end user's UC row filters / column masks
+  must apply. {{if eq .use_obo "yes"}}**Enabled for this app.**{{else}}*Not enabled for this app — set `use_obo=yes` at scaffold time to enable.*{{end}}
+- **Data API authenticator role.** When `expose_data_api=yes`, the Lakebase
+  setup creates an `authenticator` Postgres role that assumes the
+  identity of the OAuth bearer in each HTTP request. Per-user RLS policies
+  apply via `current_user`. {{if eq .expose_data_api "yes"}}**Enabled for this app.**{{else}}*Not enabled for this app.*{{end}}
 
-1. **Alembic downgrade** — works if the offending revision has a real
-   `downgrade()` (validator enforces this).
-   ```bash
-   python scripts/rollback_migration.py --strategy alembic --revision -1
-   ```
-
-2. **Branch swap** — repoint the app to a pre-deploy snapshot branch.
-   Use this when the data itself is broken, not just the schema.
-   ```bash
-   # before risky deploys, snapshot the prod branch:
-   python scripts/lakebase_branch.py ensure \
-     --instance hss-shared-lakebase --branch rollback-2026-05-20 --parent main
-   # if the deploy goes wrong:
-   python scripts/rollback_migration.py --strategy branch-swap \
-     --branch rollback-2026-05-20
-   ```
-
----
-
-## 4. Auth pattern
-
-| Operation | Identity | Why |
-|---|---|---|
-| Reads from UC tables | **OBO** (`x-forwarded-access-token`) | UC row filters / column masks / PHI policies apply at query time. |
-| Writes to Lakebase (per-app DB) | **App SP** | Apps own their own DB; users do not need direct Postgres roles. |
-| Cross-app reference reads | **App SP** with read-only grant on `shared_ref`. | |
-| Background jobs / audit log writes | **App SP** | No user context available. |
-
-The dual-mode helpers in `server/auth/` pick the right client automatically:
-
-- `get_obo_client(request)` → user-scoped `WorkspaceClient`
-- `get_sp_client()`         → SP-scoped `WorkspaceClient`
-
----
-
-## 5. Governance: what is enforced where
-
-| Concern | Enforced in | Notes |
-|---|---|---|
-| Row-level security on patient/PHI data | **UC** (row filters) | Data must be read via OBO from UC; do not land raw PHI in Lakebase. |
-| Column masking | **UC** (column masks) | Same as above. |
-| Tag-based policies | **UC** | Lakebase has no equivalent today. |
-| Per-app DB isolation | **Lakebase** (one DB per app, SP-scoped role) | Enforced by `apply_grants.py`. |
-| Per-user roles inside Lakebase | **App layer** (filter on `x-forwarded-email` / token claim) | Lakebase does not see UC identities natively. |
-| Audit log | **Audit middleware** (every request) → `/logz` → Delta sink | See §6. |
-
-### Data classification rule (binding)
-
-> **Sensitive data (PHI/PII/regulated) stays in Unity Catalog and is read on
-> behalf of the user.** Lakebase is for app state, derived/aggregated data,
-> reference data, and write-back of user actions. Landing sensitive raw data
-> in Lakebase bypasses UC governance — do not do it.
-
-The pre-deploy validator does not (cannot) enforce this — it is a review-time
-rule. Call it out explicitly in PR descriptions when you land new tables.
-
----
-
-## 6. Logging
-
-Every app uses `AuditLoggerMiddleware`. It writes one JSON line per request
-to stdout:
-
-```json
-{"ts":"2026-05-21T16:00:00Z","app":"my_app","user":"alice@hss.example",
- "method":"POST","path":"/api/orders","status":200,"ms":42.1,
- "type":"data_edit","error":null}
-```
-
-A separate `logs-sink/` bundle (committed alongside this template) tails
-`/logz` from every Databricks App and writes into a single UC table:
+## 4. Decision tree — when to create what
 
 ```
-{{.audit_catalog}}.audit.app_events
+Need a new app for HSS?
+│
+├── Does it logically belong to an existing use-case group?
+│   │
+│   ├── YES → reuse the existing project. Just give the app its own
+│   │        database name and run the per-app deploy. No bootstrap needed.
+│   │
+│   └── NO  → before scaffolding the app:
+│             1. Have platform admin run, in each env workspace:
+│                  python scripts/bootstrap_use_case_group.py \
+│                    --project <new-group> --database <app1_db>
+│             2. Provision the AD groups
+│                (hss-<new-group>-admins/writers/readers)
+│             3. Then scaffold the first app with use_case_group=<new-group>
+│
+├── Does it need shared reference data (synced UC tables) used by other
+│   apps in the same group?
+│   │
+│   ├── YES → set needs_shared_reference_data=yes at scaffold time.
+│   │        The shared_reference_db is created once by bootstrap; subsequent
+│   │        apps in the group get read-only access via permissions.yaml.
+│   │
+│   └── NO  → app has its own per-app DB only.
+│
+└── Does it need a REST API on top of Postgres for non-FastAPI consumers
+    (BI tools, Postman, low-code platforms)?
+    │
+    ├── YES → set expose_data_api=yes. Adds the Data API enablement step
+    │         to the deploy workflow.
+    │
+    └── NO  → app exposes FastAPI routes only. Default.
 ```
 
-Dashboards and alerts live in that bundle. You do not need to wire logging
-yourself — it works as long as you do not remove the middleware from
-`app.py`.
+## 5. Cost model
 
----
+Use-case-group projects are Autoscaling, so the cost shape is:
 
-## 7. Deploy is the only deploy
+- **Idle compute = $0.** Scale-to-zero kicks in after `idle_timeout_min`
+  (default 30 min). Apps with no traffic pay nothing for compute.
+- **Active compute = pay per second** at the project's `min_compute` —
+  `max_compute` slider. Set these per-group based on the apps' peak
+  concurrent QPS.
+- **Storage = pay for diff.** PR branches use copy-on-write storage, so a
+  PR branch's marginal storage cost is only the size of writes it
+  performed during validation. They also auto-delete on PR close (and
+  fall back to 7-day TTL safety in case the workflow misses the close).
+- **Compute scales independently per branch.** A burst of PR validation
+  jobs does not slow down the production branch.
 
-There is no manual deploy path. Specifically:
+## 6. Where to look for what
 
-- Do **not** click "Deploy" in the workspace UI.
-- Do **not** run `databricks bundle deploy` from your laptop against prod.
-- Do **not** use the Apps console to upload files.
-
-All four of those failure modes lose env-var injection, skip the grants
-step, skip migrations, and skip the smoke test. The GitHub Actions
-pipeline is the contract.
-
-If GitHub Actions is broken, fix GitHub Actions. Do not bypass it.
+- **`databricks.yml`** — variables, target wiring, environment binding.
+- **`app.yaml`** — runtime env vars baked at `bundle deploy` time.
+- **`server/db/lakebase.py`** — SDK-runtime connect pattern, credential refresh.
+- **`permissions.yaml`** — declarative grants (app SP + groups + UC).
+- **`scripts/bootstrap_use_case_group.py`** — one-time per (env x group) setup.
+- **`scripts/apply_grants.py`** — per-app SP grants (runs every deploy).
+- **`scripts/apply_group_grants.py`** — AD group grants (runs every deploy).
+- **`scripts/enable_data_api.py`** — Data API setup for opt-in apps.
+- **`scripts/lakebase_branch.py`** — PR branch lifecycle.
+- **`scripts/rollback_migration.py`** — alembic downgrade + PITR rollback.
+- **`docs/RUNBOOK.md`** — operational procedures.
+- **`docs/PROD_LOCKDOWN.md`** — workspace-side enforcement (deploy hardening).
+- **`docs/DATA_CLASSIFICATION.md`** — PHI/PII handling policy.

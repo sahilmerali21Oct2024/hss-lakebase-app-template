@@ -1,12 +1,43 @@
-# Runbook — common operations
+# Runbook — {{.app_name}}
 
-For why this is set up the way it is, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+For the *why*, see [ARCHITECTURE.md](./ARCHITECTURE.md). This document is the
+*what to do* — playbooks for the operations you'll actually run.
+
+App identity:
+
+- App name:        `{{.app_name}}`
+- Use-case group:  `{{.use_case_group}}`
+- Lakebase DB:     `{{.database_name}}`
+- Production branch: `production`
 
 ---
 
-## First-time setup (per repo, once)
+## First-time setup
 
-Before the first deploy will work, configure these in GitHub:
+### Step 1 — Bootstrap the use-case-group project (ONCE per env x group)
+
+This step is only required the **first time anyone in your env spins up a
+new use-case group**. If `{{.use_case_group}}` already exists in this
+workspace, skip to Step 2.
+
+Run from a machine with Databricks CLI auth to the target workspace (a
+platform admin):
+
+```bash
+python scripts/bootstrap_use_case_group.py \
+    --project {{.use_case_group}} \
+    --database {{.database_name}}
+```
+
+Repeat in each workspace (dev, test, prod). Idempotent — safe to re-run.
+
+This creates:
+- The Lakebase Autoscaling project `{{.use_case_group}}`.
+- The `production` branch on it (`no_expiry=True`).
+- The database `{{.database_name}}` on `production`.
+- The `databricks_auth` extension on `{{.database_name}}`.
+
+### Step 2 — Configure this app's GitHub repo
 
 **Branch protection + environment rules** (one command):
 
@@ -26,11 +57,9 @@ This applies:
 admin): see [`PROD_LOCKDOWN.md`](./PROD_LOCKDOWN.md). Without this, manual
 deploys from a laptop or the workspace UI still succeed.
 
+**GitHub Environments** (Settings → Environments): create `dev` and `prod`.
 
-
-**Environments** (Settings → Environments): create `dev` and `prod`.
-
-**Per-environment variables** (Settings → Environments → \<env\> → Variables):
+**Per-environment variables**:
 
 | Variable | Value |
 |---|---|
@@ -45,13 +74,14 @@ deploys from a laptop or the workspace UI still succeed.
 |---|---|
 | `DATABRICKS_CLIENT_SECRET` | CI SP secret |
 
-**One-time platform admin work** (ask the Lakebase admin):
+### Step 3 — One-time grants for the CI principal
 
-- Make the CI SP an owner of the Lakebase instance, OR
-- Grant the CI SP `CREATEROLE`, `CREATEDB`, and `WITH GRANT OPTION` on the
-  schemas listed in `permissions.yaml`.
+Ask the platform/Lakebase admin to make the CI SP a **CAN_MANAGE** member on
+the `projects/{{.use_case_group}}` ACL in each workspace. The CI SP needs
+this to run `apply_grants.py` and `apply_group_grants.py` during deploys.
 
-Without this, `apply_grants.py` will fail with permission-denied.
+For UC: the CI SP needs `MANAGE` on the catalog so it can grant downstream
+permissions to the app SP.
 
 ---
 
@@ -70,61 +100,79 @@ alembic revision -m "add orders table"
 git checkout -b feat/orders
 git commit -am "add orders table"
 git push -u origin HEAD
-# open PR — branch-per-pr.yml runs migration against pr-N
+# Opening the PR triggers branch-per-pr.yml — a child branch
+# `pr-<n>` is forked off production, migrations run against it.
 ```
 
 PR review checklist (the validator already enforces the mechanical bits):
 
-- [ ] `downgrade()` actually undoes `upgrade()`.
-- [ ] No catalog name, workspace URL, or password literal anywhere outside
-      `databricks.yml`.
-- [ ] If the new table holds sensitive data, it is in UC, not Lakebase.
+- [ ] `downgrade()` actually undoes `upgrade()`. The validator blocks empty `pass`.
+- [ ] No catalog name, workspace URL, or password literal anywhere outside `databricks.yml`.
+- [ ] If the new table holds PHI, it is in UC, not Lakebase. See `DATA_CLASSIFICATION.md`.
 - [ ] `permissions.yaml` covers the new schema/table.
 
-Merge → `deploy.yml` runs migrations + deploy + grants + restart + smoke
-test against prod.
+Merge → `deploy.yml` runs migrations + bundle deploy + apply_grants +
+apply_group_grants + (optional) enable_data_api + restart + smoke test
+against the target workspace.
 
 ---
 
 ### Production migration went wrong
 
 ```bash
-# Fast path: undo the last migration
+# Path A (preferred): undo the last migration. Use this whenever the
+# downgrade() is correct.
 python scripts/rollback_migration.py --strategy alembic --revision -1
 databricks apps restart {{.app_name}}
 
-# Data-corruption path: rebind to a snapshot branch
-#   (assumes you took a snapshot before the deploy — see ARCHITECTURE §3)
-python scripts/rollback_migration.py --strategy branch-swap \
-  --branch rollback-YYYY-MM-DD
+# Path B (data-destructive): rewind production via Lakebase PITR.
+# Use this when downgrade() can't safely undo (e.g. you DROPped a column
+# that held data you now need back). Picks a timestamp BEFORE the bad
+# migration ran. ANY data written after this timestamp will be lost.
+python scripts/rollback_migration.py --strategy pitr \
+    --timestamp 2026-05-20T14:30:00Z
 ```
 
 After rollback, open a postmortem PR. Do not patch prod-only.
 
 ---
 
-### Take a snapshot branch before a risky deploy
+### Promote {{.app_name}} from dev to prod
 
-```bash
-python scripts/lakebase_branch.py ensure \
-  --instance {{.use_case_group}} \
-  --branch rollback-$(date +%F) \
-  --parent main \
-  --idle-timeout-min 30
-```
+There is no "promote" command — the same app code is deployed to both envs,
+and the workspace it lands in determines the env. The flow is:
 
-Snapshot branches live until you delete them; they cost storage diff from
-`main`. Clean up monthly.
+1. Verify it works in dev (the dev deploy ran on merge to `main`).
+2. Trigger a manual run of `deploy.yml` with target=prod:
+
+   ```
+   GitHub repo → Actions → Deploy App → Run workflow
+     branch: main
+     target: prod
+   ```
+
+3. The prod GitHub Environment will require an approver from
+   `{{.github_codeowners_team}}` per `setup_branch_protection.py`.
+4. After approval, `deploy.yml` runs against the prod workspace.
+
+Schema migrations run as part of the deploy. Apps don't promote schemas
+separately.
 
 ---
 
-### Grant permissions to a new schema
+### Grant access to a new Databricks AD group
 
-1. Add the schema to `permissions.yaml`.
-2. Open PR. Validator confirms the YAML parses and the bundle still validates.
-3. Merge. `apply_grants.py` runs as part of the deploy.
+1. Edit `permissions.yaml` — add the group under the `groups:` section.
+   Three standard groups per use-case group are documented in the
+   commented-out block in that file.
+2. Open PR.
+3. Merge. `apply_group_grants.py` will:
+   - Set Lakebase project ACL (CAN_USE / CAN_MANAGE)
+   - Run `databricks_create_role('<group>', 'GROUP')`
+   - Issue Postgres GRANT statements
 
-You should not have to ask an admin for grants after the first-time setup.
+You should not have to ask a Lakebase admin for grants after Step 1's
+one-time CI principal setup.
 
 ---
 
@@ -139,28 +187,33 @@ fresh on every deploy via `databricks apps get`.
 
 Check in order:
 
-1. `/api/env` on the running app — are `PGHOST`, `PGUSER`, `PGDATABASE` set?
-   - If not, the `lakebase_db` resource is not bound. Look at the App
-     resource in the workspace UI and reconcile with `databricks.yml`.
+1. `/api/env` on the running app — is `LAKEBASE_PROJECT` set?
+   - If not, the bundle deploy didn't run. Check the GitHub Actions log.
 2. `/api/lakebase/test` — does it return `{"status":"error"}`? The error
    string contains the Postgres error.
 3. Did `apply_grants.py` succeed on the last deploy? Check Actions logs.
 4. Has the OAuth token been refreshed? The pool refreshes every 45 min
    (`server/db/lakebase.py`). If you see `password authentication failed`
-   continuously, restart the app.
+   continuously, restart the app: `databricks apps restart {{.app_name}}`.
+5. Has the app SP been registered as a Postgres role on this branch? Open
+   the Lakebase project UI → Roles tab — the SP UUID should appear. If
+   not, `apply_grants.py` failed; re-run from the most recent deploy log.
 
 ---
 
 ### Lakebase branch never deletes after PR close
 
-The PR-close job only runs if the workflow was enabled when the PR was
-opened. Manual cleanup:
+The PR-close job only runs if the workflow existed when the PR was opened
+*and* the run completed. Manual cleanup:
 
 ```bash
 python scripts/lakebase_branch.py delete \
-  --instance {{.use_case_group}} \
-  --branch pr-123
+    --project {{.use_case_group}} \
+    --branch pr-123
 ```
+
+PR branches also auto-expire after 7 days (TTL set by
+`scripts/lakebase_branch.py ensure`). The TTL is the safety net.
 
 ---
 
@@ -168,8 +221,48 @@ python scripts/lakebase_branch.py delete \
 
 Likely causes, in order:
 
-1. A PR branch escaped — list with `databricks postgres list-branches
-   --project {{.use_case_group}}` and delete stragglers.
-2. Snapshot branches were never cleaned up — same fix.
-3. An app is holding connections open (no idle timeout firing). Check the
-   pool sizing in `server/db/lakebase.py` (default `max_size=10`).
+1. A PR branch escaped — list with:
+   `databricks postgres list-branches --project {{.use_case_group}}`
+   then delete stragglers via `scripts/lakebase_branch.py delete`.
+2. An idle-timeout was bumped too high — check the project's compute
+   config in the Lakebase UI.
+3. An app is holding connections open. Check pool sizing in
+   `server/db/lakebase.py` (default `max_size=10`).
+4. A snapshot/manual branch was created and never cleaned up — apply TTL
+   or delete it.
+
+---
+
+### Onboard a new app into an existing use-case group
+
+If `{{.use_case_group}}` already has its production branch in this workspace,
+you only need to add a database:
+
+```bash
+python scripts/bootstrap_use_case_group.py \
+    --project {{.use_case_group}} \
+    --database new_app_db
+```
+
+Then scaffold the new app:
+
+```bash
+databricks bundle init https://github.com/{{.github_org_repo}}
+# at prompts:
+#   app_name: new-app
+#   use_case_group: {{.use_case_group}}    ← same group, so it gets the same project
+#   database_name: new_app_db                ← matches what bootstrap created
+```
+
+---
+
+### Audit + observability
+
+- App stdout/stderr is captured by the `logs-sink` pipeline (separate
+  bundle in this repo's `logs-sink/` dir). It writes structured rows to
+  `audit_catalog`.`audit`.`app_events`.
+- Drift detection: `.github/workflows/drift-detection.yml` runs hourly
+  and compares the deployed app's `EXPECTED_GIT_SHA` against the latest
+  `main` SHA. Mismatch → it opens an issue.
+- The app refuses to start if `EXPECTED_GIT_SHA` is unset. This catches
+  manual workspace-UI uploads.
